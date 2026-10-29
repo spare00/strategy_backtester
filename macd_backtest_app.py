@@ -18,13 +18,17 @@ BOLLINGER_POLICY = "Bollinger Band mean reversion"
 MONTHLY_TREND_POLICY = "Monthly 10-month SMA risk filter"
 RELATIVE_MOMENTUM_POLICY = "ETF relative momentum rotation"
 TOP_THREE_MOMENTUM_POLICY = "Monthly top-3 ETF momentum (equal weight)"
+EXPANDED_INDUSTRY_MOMENTUM_POLICY = "ETF relative momentum (expanded industries)"
 REGIME_ROTATION_POLICY = "Monthly ETF rotation (SPY regime filter)"
 ROTATION_UNIVERSE = ("SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLY", "XLI", "XLP",
                      "XLU", "XLV", "XLE", "XLB", "SMH")
+INDUSTRY_UNIVERSE = ("KBE", "KRE", "KCE", "KIE", "XAR", "XTN", "XBI", "XPH", "XHE", "XHS",
+                     "XOP", "XES", "XME", "XRT", "XHB", "XSD", "XSW", "XWEB", "XTH")
 DEFENSIVE_UNIVERSE = ("SHY", "IEF", "TLT", "GLD")
 DAILY_POLICIES = ("Close above 200-day SMA", "50/200-day SMA cross", "RSI recovery (14, 30/70)",
                   BOLLINGER_POLICY, MONTHLY_TREND_POLICY, RELATIVE_MOMENTUM_POLICY,
-                  TOP_THREE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY, MOMENTUM_POLICY, ACCUMULATION_POLICY)
+                  TOP_THREE_MOMENTUM_POLICY, EXPANDED_INDUSTRY_MOMENTUM_POLICY,
+                  REGIME_ROTATION_POLICY, MOMENTUM_POLICY, ACCUMULATION_POLICY)
 SUPERTREND_POLICY = "SuperTrend (ATR arrows)"
 ALL_POLICIES = INTRADAY_POLICIES + DAILY_POLICIES + (SUPERTREND_POLICY,)
 POLICY_LABELS = {
@@ -35,6 +39,7 @@ POLICY_LABELS = {
     MONTHLY_TREND_POLICY: "Monthly 10-month SMA risk filter",
     RELATIVE_MOMENTUM_POLICY: "Monthly ETF relative momentum rotation",
     TOP_THREE_MOMENTUM_POLICY: "Monthly top-3 ETF momentum (equal weight)",
+    EXPANDED_INDUSTRY_MOMENTUM_POLICY: "Monthly ETF relative momentum (expanded industries)",
     REGIME_ROTATION_POLICY: "Monthly ETF rotation (SPY regime filter)",
     MOMENTUM_POLICY: "Monthly 12-month absolute momentum (cash when return ≤ 0)",
     ACCUMULATION_POLICY: "Accumulation breakout (base + volume confirmation)",
@@ -127,9 +132,12 @@ if run:
     warm_start = datetime.combine(start_date - timedelta(days=400), time.min, NY).astimezone(timezone.utc)
     with st.spinner("Loading historical bars and cash distributions from Alpaca…"):
         try:
-            if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+            if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
+                          EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
                 extra_symbols = DEFENSIVE_UNIVERSE if policy == REGIME_ROTATION_POLICY else ()
-                rotation_symbols = list(dict.fromkeys((*ROTATION_UNIVERSE, *extra_symbols, symbol)))
+                universe = (ROTATION_UNIVERSE + INDUSTRY_UNIVERSE
+                            if policy == EXPANDED_INDUSTRY_MOMENTUM_POLICY else ROTATION_UNIVERSE)
+                rotation_symbols = list(dict.fromkeys((*universe, *extra_symbols, symbol)))
                 rotation_data = fetch_daily_bars_many(rotation_symbols, warm_start, end, feed)
                 rotation_actions = fetch_corporate_actions_many(
                     rotation_symbols, start_date - timedelta(days=400), end_date)
@@ -159,7 +167,8 @@ if run:
         result, trades, ledger = run_accumulation_policy(
             selected, capital, fee, slippage, range_start, distributions, cash_yield,
             base_days, max_base_range, breakout_volume, cmf_threshold)
-    elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+    elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
+                    EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
         rotation_frames = {ticker: bars[bars.index >= range_start - pd.Timedelta(days=400)]
                            for ticker, bars in rotation_data.items()}
         rotation_dividends = {ticker: dividend_events(rotation_actions.get(ticker, {}),
@@ -224,6 +233,8 @@ if run:
         st.caption("Rank the ETF universe by trailing 12-month total return at month-end. Hold the top ETF only when its 12-month return is positive and its month-end close is above its 10-month average; otherwise stay in cash. Trades occur at the next session open. The selected symbol is the benchmark.")
     if policy == TOP_THREE_MOMENTUM_POLICY:
         st.caption("At each completed month-end, rank the same ETF universe by trailing 12-month total return. Hold the top three qualifying ETFs in equal weights; each must have positive 12-month return and close above its 10-month average. Hold cash if none qualify. Rebalance at the next session open; the selected symbol is the benchmark.")
+    if policy == EXPANDED_INDUSTRY_MOMENTUM_POLICY:
+        st.caption("Uses the existing ETF relative-momentum rules and adds established industry ETFs for banks, regional banks, biotech, retail, homebuilders, transportation, semiconductors, software, and other industries. Rank all eligible ETFs by trailing 12-month total return; hold the strongest positive-return ETF only if it is above its 10-month average. Trades fill at the next session open; the selected symbol is the benchmark.")
     if policy == REGIME_ROTATION_POLICY:
         st.caption("At each completed month-end, SPY must have positive 12-month total return and close above its 10-month average for the strategy to hold equities. If either test fails, it rotates to the strongest Treasury or gold ETF with positive 12-month return and price above its 10-month average, or holds cash if none qualify. Trades fill next session open; the selected symbol is the benchmark.")
     st.subheader("Cash distributions (not reinvested)")
@@ -284,7 +295,8 @@ if run:
     if trades_df.empty:
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
-    elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+    elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
+                    EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
     else:
@@ -294,14 +306,18 @@ if run:
                                  else ("triangle-up", "triangle-down"))
         buys = alt.Chart(trades_df[trades_df.Side == "Buy"]).mark_point(shape=buy_shape, filled=True, size=75, color="#16a34a").encode(x="Fill time:T", y="Price:Q")
         sells = alt.Chart(trades_df[trades_df.Side != "Buy"]).mark_point(shape=sell_shape, filled=True, size=75, color="#dc2626").encode(x="Fill time:T", y="Price:Q")
-    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY) else "Price and fills")
+    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
+                                                              EXPANDED_INDUSTRY_MOMENTUM_POLICY,
+                                                              REGIME_ROTATION_POLICY) else "Price and fills")
     st.altair_chart(line + buys + sells, use_container_width=True)
-    if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+    if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
+                  EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
         st.subheader("ETF held by the strategy")
         allocation = alt.Chart(price).mark_line(interpolate="step-after", strokeWidth=2).encode(
             x=alt.X("Time:T", title="Time"),
             y=alt.Y("rotation_symbol:N", title="Selected ETF",
-                    sort=list(ROTATION_UNIVERSE) + list(DEFENSIVE_UNIVERSE) + [symbol, "CASH"]))
+                    sort=list(ROTATION_UNIVERSE) + list(INDUSTRY_UNIVERSE) +
+                    list(DEFENSIVE_UNIVERSE) + [symbol, "CASH"]))
         st.altair_chart(allocation, use_container_width=True)
     if policy == "RSI recovery (14, 30/70)":
         rsi_frame = result.reset_index().rename(columns={result.index.name or "index": "Time"})
