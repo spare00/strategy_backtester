@@ -70,8 +70,9 @@ st.title("Historical Strategy Comparison")
 st.caption("Historical Alpaca bars only. Simulated trades do not submit orders.")
 st.info("Bars are split-adjusted. Dividends are held as cash, based on shares carried past the prior session close; they are credited on payment date. Amounts are gross before tax or withholding. Corporate-action records may be delayed.")
 
-st.session_state.setdefault("bar_interval", 10)
-st.session_state.setdefault("policy", INTRADAY_POLICIES[0])
+POLICY_OPTIONS = sorted(ALL_POLICIES, key=lambda value: POLICY_LABELS[value].casefold())
+st.session_state.setdefault("policy", POLICY_OPTIONS[0])
+st.session_state.setdefault("bar_interval", "Daily" if POLICY_OPTIONS[0] in DAILY_POLICIES else 10)
 
 with st.sidebar:
     st.header("Backtest setup")
@@ -83,7 +84,7 @@ with st.sidebar:
     today = datetime.now(NY).date()
     start_date = st.date_input("Start date", today - timedelta(days=365), max_value=today, key="date_start")
     end_date = st.date_input("End date", today, max_value=today, key="date_end")
-    policy = st.selectbox("Policy", sorted(ALL_POLICIES, key=lambda value: POLICY_LABELS[value].casefold()),
+    policy = st.selectbox("Policy", POLICY_OPTIONS,
                           format_func=lambda value: POLICY_LABELS[value], key="policy",
                           on_change=_sync_interval_to_policy)
     daily = interval == "Daily"
