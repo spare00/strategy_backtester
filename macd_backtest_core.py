@@ -405,9 +405,12 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  distributions: dict[str, list[dict]] | None = None,
                                  cash_yield_pct: float = 0.0,
                                  defensive_symbols: tuple[str, ...] | None = None,
-                                 regime_symbol: str | None = None
+                                 regime_symbol: str | None = None,
+                                 top_n: int = 1
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
-    """Rotate monthly by momentum; optionally gate equities on a market index trend."""
+    """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
+    if top_n < 1:
+        raise ValueError("top_n must be at least 1")
     usable = {symbol: frame for symbol, frame in frames.items() if not frame.empty}
     if benchmark_symbol not in usable or not usable:
         return pd.DataFrame(), [], []
@@ -436,7 +439,7 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
     decisions, decision_dates = pd.Series(index=closes.index, dtype=object), pd.Series(index=closes.index, dtype=object)
     monthly_average = month_closes.rolling(10, min_periods=10).mean()
     for i, stamp in enumerate(month_ends):
-        winner = "CASH"
+        winners = ()
         if stamp in monthly_average.index and i >= 9:
             prior = int(closes.index.searchsorted(stamp - pd.DateOffset(months=12), side="right")) - 1
             if prior >= 0:
@@ -463,9 +466,9 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                         target[symbol] = momentum
                 candidates = (equity_candidates if regime_pass else {}) or defensive_candidates
                 if candidates:
-                    winner = max(candidates, key=candidates.get)
-        decisions.loc[stamp], decision_dates.loc[stamp] = winner, stamp
-    targets = decisions.ffill().shift(1).fillna("CASH")
+                    winners = tuple(sorted(candidates, key=candidates.get, reverse=True)[:top_n])
+        decisions.loc[stamp], decision_dates.loc[stamp] = winners, stamp
+    targets = decisions.ffill().shift(1).apply(lambda value: value if isinstance(value, tuple) else ())
     signal_dates = decision_dates.ffill().shift(1)
 
     start_i = int(index.searchsorted(range_start))
@@ -473,9 +476,9 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         return pd.DataFrame(), [], []
     data = usable[benchmark_symbol].reindex(index).iloc[start_i:].copy()
     aligned = {symbol: frame.reindex(index) for symbol, frame in usable.items()}
-    cash, dividend_cash, shares, held = initial_cash, 0.0, 0, None
+    cash, dividend_cash, portfolio = initial_cash, 0.0, {}
     cash_factor = _daily_cash_factor(cash_yield_pct)
-    trades, equity, invested, holdings = [], [], [], []
+    trades, equity, invested, holdings_history = [], [], [], []
     for i in range(start_i, len(index)):
         stamp = index[i]
         if i > start_i:
@@ -483,52 +486,60 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         for symbol, items in events.items():
             for event in items:
                 if event["shares"] is None and stamp.date() >= event["ex_date"]:
-                    event["shares"] = shares if held == symbol else 0
+                    event["shares"] = portfolio.get(symbol, 0)
                     event["amount"] = event["shares"] * event["rate"]
                 if event["shares"] is not None and not event["paid"] and event["pay_date"] and stamp.date() >= event["pay_date"]:
                     dividend_cash += event["amount"]
                     event["paid"] = True
-        desired = str(targets.iloc[i])
+        desired = targets.iloc[i]
         signal_time = signal_dates.iloc[i] if pd.notna(signal_dates.iloc[i]) else index[max(i - 1, 0)]
-        held_open = aligned[held].loc[stamp, "open"] if held else None
-        desired_open = aligned[desired].loc[stamp, "open"] if desired != "CASH" else None
-        can_switch = (desired == "CASH" or pd.notna(desired_open)) and (not held or pd.notna(held_open))
-        if held != desired and can_switch:
-            if shares:
-                price = float(held_open) * (1 - slippage_bps / 10000)
-                cash += shares * (price - fee_per_share)
-                trades.append({"Asset": held, "Side": "Sell", "Signal time": signal_time,
-                               "Fill time": stamp, "Price": price, "Shares": shares})
-                held, shares = None, 0
-            if desired != "CASH":
-                price = float(desired_open) * (1 + slippage_bps / 10000)
-                quantity = int(cash / (price + fee_per_share))
-                if quantity:
-                    cash -= quantity * (price + fee_per_share)
-                    held, shares = desired, quantity
-                    trades.append({"Asset": held, "Side": "Buy", "Signal time": signal_time,
-                                   "Fill time": stamp, "Price": price, "Shares": shares})
+        desired_opens = {symbol: aligned[symbol].loc[stamp, "open"] for symbol in desired}
+        current_opens = {symbol: aligned[symbol].loc[stamp, "open"] for symbol in portfolio}
+        can_switch = all(pd.notna(price) for price in desired_opens.values()) and all(
+            pd.notna(price) for price in current_opens.values())
+        new_monthly_signal = i > start_i and pd.notna(signal_time) and signal_time != signal_dates.iloc[i - 1]
+        rebalance = set(portfolio) != set(desired) or (top_n > 1 and bool(desired) and new_monthly_signal)
+        if rebalance and can_switch:
+            for symbol, quantity in portfolio.items():
+                price = float(current_opens[symbol]) * (1 - slippage_bps / 10000)
+                cash += quantity * (price - fee_per_share)
+                trades.append({"Asset": symbol, "Side": "Sell", "Signal time": signal_time,
+                               "Fill time": stamp, "Price": price, "Shares": quantity})
+            portfolio = {}
+            if desired:
+                allocation = cash / len(desired)
+                for symbol in desired:
+                    price = float(desired_opens[symbol]) * (1 + slippage_bps / 10000)
+                    quantity = int(allocation / (price + fee_per_share))
+                    if quantity:
+                        cash -= quantity * (price + fee_per_share)
+                        portfolio[symbol] = quantity
+                        trades.append({"Asset": symbol, "Side": "Buy", "Signal time": signal_time,
+                                       "Fill time": stamp, "Price": price, "Shares": quantity})
         receivable = sum(event["amount"] for items in events.values() for event in items
                          if event["shares"] is not None and not event["paid"])
-        close = aligned[held].loc[stamp, "close"] if held else 0.0
-        if held and pd.isna(close):
-            close = aligned[held].loc[:stamp, "close"].ffill().iloc[-1]
-        held_value = shares * float(close) if held else 0.0
+        held_value = 0.0
+        for symbol, quantity in portfolio.items():
+            close = aligned[symbol].loc[stamp, "close"]
+            if pd.isna(close):
+                close = aligned[symbol].loc[:stamp, "close"].ffill().iloc[-1]
+            held_value += quantity * float(close)
         equity.append(cash + dividend_cash + held_value + receivable)
-        invested.append(bool(shares))
-        holdings.append(held or "CASH")
+        invested.append(bool(portfolio))
+        holdings_history.append(", ".join(portfolio) if portfolio else "CASH")
 
-    if shares:
+    if portfolio:
         stamp = index[-1]
-        price = float(aligned[held].loc[:stamp, "close"].ffill().iloc[-1]) * (1 - slippage_bps / 10000)
-        cash += shares * (price - fee_per_share)
-        trades.append({"Asset": held, "Side": "Final liquidation", "Signal time": stamp,
-                       "Fill time": stamp, "Price": price, "Shares": shares})
+        for symbol, quantity in portfolio.items():
+            price = float(aligned[symbol].loc[:stamp, "close"].ffill().iloc[-1]) * (1 - slippage_bps / 10000)
+            cash += quantity * (price - fee_per_share)
+            trades.append({"Asset": symbol, "Side": "Final liquidation", "Signal time": stamp,
+                           "Fill time": stamp, "Price": price, "Shares": quantity})
         receivable = sum(event["amount"] for items in events.values() for event in items
                          if event["shares"] is not None and not event["paid"])
         equity[-1] = cash + dividend_cash + receivable
-        invested[-1], holdings[-1] = False, "CASH"
-    data["equity"], data["invested"], data["rotation_symbol"] = equity, invested, holdings
+        invested[-1], holdings_history[-1] = False, "CASH"
+    data["equity"], data["invested"], data["rotation_symbol"] = equity, invested, holdings_history
     ledger = [{"Asset": symbol, "Ex-date": event["ex_date"], "Payment date": event["pay_date"],
                "Rate / share": event["rate"], "Eligible shares": event["shares"] or 0,
                "Distribution": event["amount"],
