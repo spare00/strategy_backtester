@@ -108,7 +108,6 @@ with st.sidebar:
         st.warning("IEX volume covers one exchange. Select SIP for broader market-wide volume when your account permits it.")
     run = st.button("Run comparison", type="primary")
 
-st.markdown("**Daily policies:** close above the 200-day SMA stays long; close below it moves to cash. The 50/200-day SMA rule stays long when SMA50 is above SMA200 and moves to cash below it. RSI starts in cash and trades threshold recoveries. Bollinger mean reversion buys below the lower band and exits at the middle band. The monthly 10-month SMA filter stays invested during long-term uptrends and moves to cash after a month-end close below the average. ETF relative momentum rotates monthly into the strongest eligible index or sector ETF. Twelve-month absolute momentum uses trailing total return. Accumulation breakout looks for a tight base and rising buying pressure before a volume-confirmed breakout. Signals execute at the next trading session open. Intraday MACD policies remain available when a minute interval is selected.")
 if run:
     if start_date > end_date:
         st.error("Start date must be on or before end date.")
@@ -188,6 +187,15 @@ if run:
     st.caption(f"{len(result):,} {timeframe}, {result.index[0]:%Y-%m-%d} to {result.index[-1]:%Y-%m-%d}; {len(trades)} fill events; {feed.upper()} feed. Prices are split-adjusted.")
     if policy == SUPERTREND_POLICY:
         st.caption(f"SuperTrend ATR({atr_length}) uses Wilder RMA seeded by the mean of its first {atr_length} true ranges, with multiplier {multiplier:g}; direction starts bearish on the first valid ATR bar. Signals use a completed bar and fill at the next {('session' if daily else 'regular-session')} open. Chart arrows mark signals; circles mark fills. No EOD flattening; final liquidation is at the last close.")
+    if policy == "Close above 200-day SMA":
+        st.caption("Stay invested while the daily close is above its 200-day simple moving average; move to cash below it. Signals fill at the next session open.")
+    if policy == "50/200-day SMA cross":
+        st.caption("Stay invested while the 50-day simple moving average is above the 200-day average; move to cash when it falls below. Signals fill at the next session open.")
+    if policy in INTRADAY_POLICIES:
+        description = ("Buy when MACD turns up below zero and sell when it turns down above zero. Signals fill at the next bar open."
+                      if policy == INTRADAY_POLICIES[0] else
+                      "Trade MACD turns with the daily close above the 200-day average as a long-term filter. Signals fill at the next bar open.")
+        st.caption(description)
     if policy == "RSI recovery (14, 30/70)":
         st.caption(f"RSI({rsi_length}) uses Wilder smoothing seeded by the first {rsi_length} daily close changes. Flat prices yield 50; zero average loss yields 100. No signal is generated until RSI and its prior value are valid. Chart triangles mark confirmed signals; price chart circles mark actual fills. Overnight positions are liquidated at the final close for end-of-range valuation.")
     if policy == MOMENTUM_POLICY:
