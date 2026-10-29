@@ -406,7 +406,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  cash_yield_pct: float = 0.0,
                                  defensive_symbols: tuple[str, ...] | None = None,
                                  regime_symbol: str | None = None,
-                                 top_n: int = 1
+                                 top_n: int = 1,
+                                 skip_recent_month: bool = False
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
@@ -440,8 +441,9 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
     monthly_average = month_closes.rolling(10, min_periods=10).mean()
     for i, stamp in enumerate(month_ends):
         winners = ()
-        if stamp in monthly_average.index and i >= 9:
-            prior = int(closes.index.searchsorted(stamp - pd.DateOffset(months=12), side="right")) - 1
+        momentum_end = month_ends[i - 1] if skip_recent_month and i > 0 else stamp
+        if stamp in monthly_average.index and i >= 9 and (not skip_recent_month or i > 0):
+            prior = int(closes.index.searchsorted(momentum_end - pd.DateOffset(months=12), side="right")) - 1
             if prior >= 0:
                 equity_candidates, defensive_candidates = {}, {}
                 regime_pass = True
@@ -456,7 +458,7 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                        gate_close > gate_average and gate_now / gate_then - 1 > 0)
                 for symbol in closes.columns:
                     price, trend = month_closes.loc[stamp, symbol], monthly_average.loc[stamp, symbol]
-                    current_tr, prior_tr = total_return.loc[stamp, symbol], total_return.iloc[prior][symbol]
+                    current_tr, prior_tr = total_return.loc[momentum_end, symbol], total_return.iloc[prior][symbol]
                     if pd.isna(price) or pd.isna(trend) or pd.isna(current_tr) or pd.isna(prior_tr) or prior_tr == 0:
                         continue
                     momentum = float(current_tr / prior_tr - 1)

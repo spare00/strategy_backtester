@@ -19,6 +19,7 @@ MONTHLY_TREND_POLICY = "Monthly 10-month SMA risk filter"
 RELATIVE_MOMENTUM_POLICY = "ETF relative momentum rotation"
 TOP_THREE_MOMENTUM_POLICY = "Monthly top-3 ETF momentum (equal weight)"
 EXPANDED_INDUSTRY_MOMENTUM_POLICY = "ETF relative momentum (expanded industries)"
+SKIP_MONTH_MOMENTUM_POLICY = "ETF relative momentum (skip last month)"
 REGIME_ROTATION_POLICY = "Monthly ETF rotation (SPY regime filter)"
 ROTATION_UNIVERSE = ("SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLY", "XLI", "XLP",
                      "XLU", "XLV", "XLE", "XLB", "SMH")
@@ -28,7 +29,7 @@ DEFENSIVE_UNIVERSE = ("SHY", "IEF", "TLT", "GLD")
 DAILY_POLICIES = ("Close above 200-day SMA", "50/200-day SMA cross", "RSI recovery (14, 30/70)",
                   BOLLINGER_POLICY, MONTHLY_TREND_POLICY, RELATIVE_MOMENTUM_POLICY,
                   TOP_THREE_MOMENTUM_POLICY, EXPANDED_INDUSTRY_MOMENTUM_POLICY,
-                  REGIME_ROTATION_POLICY, MOMENTUM_POLICY, ACCUMULATION_POLICY)
+                  SKIP_MONTH_MOMENTUM_POLICY, REGIME_ROTATION_POLICY, MOMENTUM_POLICY, ACCUMULATION_POLICY)
 SUPERTREND_POLICY = "SuperTrend (ATR arrows)"
 ALL_POLICIES = INTRADAY_POLICIES + DAILY_POLICIES + (SUPERTREND_POLICY,)
 POLICY_LABELS = {
@@ -40,6 +41,7 @@ POLICY_LABELS = {
     RELATIVE_MOMENTUM_POLICY: "Monthly ETF relative momentum rotation",
     TOP_THREE_MOMENTUM_POLICY: "Monthly top-3 ETF momentum (equal weight)",
     EXPANDED_INDUSTRY_MOMENTUM_POLICY: "Monthly ETF relative momentum (expanded industries)",
+    SKIP_MONTH_MOMENTUM_POLICY: "Monthly ETF relative momentum (12–1; skip latest month)",
     REGIME_ROTATION_POLICY: "Monthly ETF rotation (SPY regime filter)",
     MOMENTUM_POLICY: "Monthly 12-month absolute momentum (cash when return ≤ 0)",
     ACCUMULATION_POLICY: "Accumulation breakout (base + volume confirmation)",
@@ -133,7 +135,8 @@ if run:
     with st.spinner("Loading historical bars and cash distributions from Alpaca…"):
         try:
             if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
-                          EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+                          EXPANDED_INDUSTRY_MOMENTUM_POLICY, SKIP_MONTH_MOMENTUM_POLICY,
+                          REGIME_ROTATION_POLICY):
                 extra_symbols = DEFENSIVE_UNIVERSE if policy == REGIME_ROTATION_POLICY else ()
                 universe = (ROTATION_UNIVERSE + INDUSTRY_UNIVERSE
                             if policy == EXPANDED_INDUSTRY_MOMENTUM_POLICY else ROTATION_UNIVERSE)
@@ -168,7 +171,8 @@ if run:
             selected, capital, fee, slippage, range_start, distributions, cash_yield,
             base_days, max_base_range, breakout_volume, cmf_threshold)
     elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
-                    EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+                    EXPANDED_INDUSTRY_MOMENTUM_POLICY, SKIP_MONTH_MOMENTUM_POLICY,
+                    REGIME_ROTATION_POLICY):
         rotation_frames = {ticker: bars[bars.index >= range_start - pd.Timedelta(days=400)]
                            for ticker, bars in rotation_data.items()}
         rotation_dividends = {ticker: dividend_events(rotation_actions.get(ticker, {}),
@@ -178,7 +182,8 @@ if run:
             rotation_frames, symbol, capital, fee, slippage, range_start, rotation_dividends, cash_yield,
             DEFENSIVE_UNIVERSE if policy == REGIME_ROTATION_POLICY else None,
             "SPY" if policy == REGIME_ROTATION_POLICY else None,
-            3 if policy == TOP_THREE_MOMENTUM_POLICY else 1)
+            3 if policy == TOP_THREE_MOMENTUM_POLICY else 1,
+            skip_recent_month=policy == SKIP_MONTH_MOMENTUM_POLICY)
     elif daily:
         result, trades, ledger = run_daily_policy(selected, capital, policy, fee, slippage, range_start,
                                                   distributions, cash_yield, momentum_dividends,
@@ -235,6 +240,8 @@ if run:
         st.caption("At each completed month-end, rank the same ETF universe by trailing 12-month total return. Hold the top three qualifying ETFs in equal weights; each must have positive 12-month return and close above its 10-month average. Hold cash if none qualify. Rebalance at the next session open; the selected symbol is the benchmark.")
     if policy == EXPANDED_INDUSTRY_MOMENTUM_POLICY:
         st.caption("Uses the existing ETF relative-momentum rules and adds established industry ETFs for banks, regional banks, biotech, retail, homebuilders, transportation, semiconductors, software, and other industries. Rank all eligible ETFs by trailing 12-month total return; hold the strongest positive-return ETF only if it is above its 10-month average. Trades fill at the next session open; the selected symbol is the benchmark.")
+    if policy == SKIP_MONTH_MOMENTUM_POLICY:
+        st.caption("Uses the same ETF universe and filters as ETF relative momentum rotation, but ranks on the trailing 12-month total return ending at the prior month-end, excluding the latest month. Hold the strongest positive-return ETF only if it is above its 10-month average; otherwise stay in cash. Trades fill at the next session open.")
     if policy == REGIME_ROTATION_POLICY:
         st.caption("At each completed month-end, SPY must have positive 12-month total return and close above its 10-month average for the strategy to hold equities. If either test fails, it rotates to the strongest Treasury or gold ETF with positive 12-month return and price above its 10-month average, or holds cash if none qualify. Trades fill next session open; the selected symbol is the benchmark.")
     st.subheader("Cash distributions (not reinvested)")
@@ -296,7 +303,8 @@ if run:
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
     elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
-                    EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+                    EXPANDED_INDUSTRY_MOMENTUM_POLICY, SKIP_MONTH_MOMENTUM_POLICY,
+                    REGIME_ROTATION_POLICY):
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
     else:
@@ -308,10 +316,12 @@ if run:
         sells = alt.Chart(trades_df[trades_df.Side != "Buy"]).mark_point(shape=sell_shape, filled=True, size=75, color="#dc2626").encode(x="Fill time:T", y="Price:Q")
     st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
                                                               EXPANDED_INDUSTRY_MOMENTUM_POLICY,
+                                                              SKIP_MONTH_MOMENTUM_POLICY,
                                                               REGIME_ROTATION_POLICY) else "Price and fills")
     st.altair_chart(line + buys + sells, use_container_width=True)
     if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY,
-                  EXPANDED_INDUSTRY_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+                  EXPANDED_INDUSTRY_MOMENTUM_POLICY, SKIP_MONTH_MOMENTUM_POLICY,
+                  REGIME_ROTATION_POLICY):
         st.subheader("ETF held by the strategy")
         allocation = alt.Chart(price).mark_line(interpolate="step-after", strokeWidth=2).encode(
             x=alt.X("Time:T", title="Time"),
