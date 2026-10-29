@@ -39,7 +39,7 @@ def account_zero_credentials() -> tuple[str, str]:
 def fetch_bars(symbol: str, interval: int, start: datetime, end: datetime, feed: str) -> pd.DataFrame:
     client = StockHistoricalDataClient(*account_zero_credentials())
     request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(interval, TimeFrameUnit.Minute),
-                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT)
+                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT, limit=10000)
     bars = client.get_stock_bars(request).data.get(symbol, [])
     if not bars:
         return pd.DataFrame()
@@ -52,7 +52,7 @@ def fetch_bars(symbol: str, interval: int, start: datetime, end: datetime, feed:
 def fetch_daily_bars(symbol: str, start: datetime, end: datetime, feed: str) -> pd.DataFrame:
     client = StockHistoricalDataClient(*account_zero_credentials())
     request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT)
+                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT, limit=10000)
     bars = client.get_stock_bars(request).data.get(symbol, [])
     if not bars:
         return pd.DataFrame()
@@ -65,10 +65,11 @@ def fetch_daily_bars(symbol: str, start: datetime, end: datetime, feed: str) -> 
 
 def fetch_daily_bars_many(symbols: list[str], start: datetime, end: datetime, feed: str) -> dict[str, pd.DataFrame]:
     client = StockHistoricalDataClient(*account_zero_credentials())
-    request = StockBarsRequest(symbol_or_symbols=symbols, timeframe=TimeFrame.Day,
-                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT)
     result = {}
-    for symbol, bars in client.get_stock_bars(request).data.items():
+    for symbol in symbols:
+        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                                   start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT, limit=10000)
+        bars = client.get_stock_bars(request).data.get(symbol, [])
         if bars:
             frame = pd.DataFrame([{"date": bar.timestamp.date(), "open": float(bar.open),
                                    "high": float(bar.high), "low": float(bar.low),
@@ -402,14 +403,16 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  initial_cash: float, fee_per_share: float, slippage_bps: float,
                                  range_start: pd.Timestamp,
                                  distributions: dict[str, list[dict]] | None = None,
-                                 cash_yield_pct: float = 0.0
+                                 cash_yield_pct: float = 0.0,
+                                 defensive_symbols: tuple[str, ...] | None = None,
+                                 regime_symbol: str | None = None
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
-    """Rotate monthly into the strongest ETF with positive 12-month return above its 10-month SMA."""
+    """Rotate monthly by momentum; optionally gate equities on a market index trend."""
     usable = {symbol: frame for symbol, frame in frames.items() if not frame.empty}
     if benchmark_symbol not in usable or not usable:
         return pd.DataFrame(), [], []
-    common = pd.concat({symbol: frame for symbol, frame in usable.items()}, axis=1, join="inner").sort_index()
-    closes = common.xs("close", axis=1, level=1).astype(float)
+    index = usable[benchmark_symbol].index
+    closes = pd.DataFrame({symbol: frame["close"].reindex(index) for symbol, frame in usable.items()})
     month = pd.Series(closes.index.strftime("%Y-%m"), index=closes.index)
     month_ends = closes.index[month.ne(month.shift(-1)) & month.shift(-1).notna()]
     month_closes = closes.loc[month_ends]
@@ -420,11 +423,15 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
     for symbol, items in events.items():
         for event in items:
             rates[symbol][event["ex_date"]] = rates[symbol].get(event["ex_date"], 0.0) + event["rate"]
-    total_return = pd.DataFrame(1.0, index=closes.index, columns=closes.columns)
-    for i in range(1, len(closes)):
-        stamp = closes.index[i].date()
-        daily_dividend = pd.Series({symbol: rates[symbol].get(stamp, 0.0) for symbol in closes.columns})
-        total_return.iloc[i] = total_return.iloc[i - 1] * (closes.iloc[i] + daily_dividend) / closes.iloc[i - 1]
+    total_return = pd.DataFrame(index=closes.index, columns=closes.columns, dtype=float)
+    for symbol in closes:
+        daily_dividend = pd.Series([rates[symbol].get(stamp.date(), 0.0) for stamp in closes.index],
+                                   index=closes.index)
+        gross_return = (closes[symbol] + daily_dividend).div(closes[symbol].shift(1))
+        first = closes[symbol].first_valid_index()
+        if first is not None:
+            gross_return.loc[first] = 1.0
+        total_return[symbol] = gross_return.cumprod()
 
     decisions, decision_dates = pd.Series(index=closes.index, dtype=object), pd.Series(index=closes.index, dtype=object)
     monthly_average = month_closes.rolling(10, min_periods=10).mean()
@@ -433,24 +440,39 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         if stamp in monthly_average.index and i >= 9:
             prior = int(closes.index.searchsorted(stamp - pd.DateOffset(months=12), side="right")) - 1
             if prior >= 0:
-                candidates = {}
+                equity_candidates, defensive_candidates = {}, {}
+                regime_pass = True
+                if defensive_symbols is not None:
+                    regime_pass = False
+                    if regime_symbol in closes.columns:
+                        gate_close = month_closes.loc[stamp, regime_symbol]
+                        gate_average = monthly_average.loc[stamp, regime_symbol]
+                        gate_now, gate_then = total_return.loc[stamp, regime_symbol], total_return.iloc[prior][regime_symbol]
+                        regime_pass = (pd.notna(gate_close) and pd.notna(gate_average) and
+                                       pd.notna(gate_now) and pd.notna(gate_then) and gate_then != 0 and
+                                       gate_close > gate_average and gate_now / gate_then - 1 > 0)
                 for symbol in closes.columns:
-                    price = float(month_closes.loc[stamp, symbol])
-                    trend = float(monthly_average.loc[stamp, symbol])
-                    momentum = float(total_return.loc[stamp, symbol] / total_return.iloc[prior][symbol] - 1)
+                    price, trend = month_closes.loc[stamp, symbol], monthly_average.loc[stamp, symbol]
+                    current_tr, prior_tr = total_return.loc[stamp, symbol], total_return.iloc[prior][symbol]
+                    if pd.isna(price) or pd.isna(trend) or pd.isna(current_tr) or pd.isna(prior_tr) or prior_tr == 0:
+                        continue
+                    momentum = float(current_tr / prior_tr - 1)
                     if price > trend and momentum > 0:
-                        candidates[symbol] = momentum
+                        target = (defensive_candidates if defensive_symbols is not None and
+                                  symbol in defensive_symbols else equity_candidates)
+                        target[symbol] = momentum
+                candidates = (equity_candidates if regime_pass else {}) or defensive_candidates
                 if candidates:
                     winner = max(candidates, key=candidates.get)
         decisions.loc[stamp], decision_dates.loc[stamp] = winner, stamp
     targets = decisions.ffill().shift(1).fillna("CASH")
     signal_dates = decision_dates.ffill().shift(1)
 
-    index = closes.index
     start_i = int(index.searchsorted(range_start))
     if start_i >= len(index):
         return pd.DataFrame(), [], []
     data = usable[benchmark_symbol].reindex(index).iloc[start_i:].copy()
+    aligned = {symbol: frame.reindex(index) for symbol, frame in usable.items()}
     cash, dividend_cash, shares, held = initial_cash, 0.0, 0, None
     cash_factor = _daily_cash_factor(cash_yield_pct)
     trades, equity, invested, holdings = [], [], [], []
@@ -468,15 +490,18 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                     event["paid"] = True
         desired = str(targets.iloc[i])
         signal_time = signal_dates.iloc[i] if pd.notna(signal_dates.iloc[i]) else index[max(i - 1, 0)]
-        if held != desired:
+        held_open = aligned[held].loc[stamp, "open"] if held else None
+        desired_open = aligned[desired].loc[stamp, "open"] if desired != "CASH" else None
+        can_switch = (desired == "CASH" or pd.notna(desired_open)) and (not held or pd.notna(held_open))
+        if held != desired and can_switch:
             if shares:
-                price = float(common.loc[stamp, (held, "open")]) * (1 - slippage_bps / 10000)
+                price = float(held_open) * (1 - slippage_bps / 10000)
                 cash += shares * (price - fee_per_share)
                 trades.append({"Asset": held, "Side": "Sell", "Signal time": signal_time,
                                "Fill time": stamp, "Price": price, "Shares": shares})
                 held, shares = None, 0
             if desired != "CASH":
-                price = float(common.loc[stamp, (desired, "open")]) * (1 + slippage_bps / 10000)
+                price = float(desired_open) * (1 + slippage_bps / 10000)
                 quantity = int(cash / (price + fee_per_share))
                 if quantity:
                     cash -= quantity * (price + fee_per_share)
@@ -485,14 +510,17 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                    "Fill time": stamp, "Price": price, "Shares": shares})
         receivable = sum(event["amount"] for items in events.values() for event in items
                          if event["shares"] is not None and not event["paid"])
-        held_value = shares * float(common.loc[stamp, (held, "close")]) if held else 0.0
+        close = aligned[held].loc[stamp, "close"] if held else 0.0
+        if held and pd.isna(close):
+            close = aligned[held].loc[:stamp, "close"].ffill().iloc[-1]
+        held_value = shares * float(close) if held else 0.0
         equity.append(cash + dividend_cash + held_value + receivable)
         invested.append(bool(shares))
         holdings.append(held or "CASH")
 
     if shares:
         stamp = index[-1]
-        price = float(common.loc[stamp, (held, "close")]) * (1 - slippage_bps / 10000)
+        price = float(aligned[held].loc[:stamp, "close"].ffill().iloc[-1]) * (1 - slippage_bps / 10000)
         cash += shares * (price - fee_per_share)
         trades.append({"Asset": held, "Side": "Final liquidation", "Signal time": stamp,
                        "Fill time": stamp, "Price": price, "Shares": shares})

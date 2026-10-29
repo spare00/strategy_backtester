@@ -17,11 +17,13 @@ ACCUMULATION_POLICY = "Accumulation breakout"
 BOLLINGER_POLICY = "Bollinger Band mean reversion"
 MONTHLY_TREND_POLICY = "Monthly 10-month SMA risk filter"
 RELATIVE_MOMENTUM_POLICY = "ETF relative momentum rotation"
+REGIME_ROTATION_POLICY = "Monthly ETF rotation (SPY regime filter)"
 ROTATION_UNIVERSE = ("SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLY", "XLI", "XLP",
                      "XLU", "XLV", "XLE", "XLB", "SMH")
+DEFENSIVE_UNIVERSE = ("SHY", "IEF", "TLT", "GLD")
 DAILY_POLICIES = ("Close above 200-day SMA", "50/200-day SMA cross", "RSI recovery (14, 30/70)",
                   BOLLINGER_POLICY, MONTHLY_TREND_POLICY, RELATIVE_MOMENTUM_POLICY,
-                  MOMENTUM_POLICY, ACCUMULATION_POLICY)
+                  REGIME_ROTATION_POLICY, MOMENTUM_POLICY, ACCUMULATION_POLICY)
 SUPERTREND_POLICY = "SuperTrend (ATR arrows)"
 ALL_POLICIES = INTRADAY_POLICIES + DAILY_POLICIES + (SUPERTREND_POLICY,)
 POLICY_LABELS = {
@@ -31,6 +33,7 @@ POLICY_LABELS = {
     BOLLINGER_POLICY: "Daily Bollinger Bands (mean reversion)",
     MONTHLY_TREND_POLICY: "Monthly 10-month SMA risk filter",
     RELATIVE_MOMENTUM_POLICY: "Monthly ETF relative momentum rotation",
+    REGIME_ROTATION_POLICY: "Monthly ETF rotation (SPY regime filter)",
     MOMENTUM_POLICY: "Monthly 12-month absolute momentum (cash when return ≤ 0)",
     ACCUMULATION_POLICY: "Accumulation breakout (base + volume confirmation)",
     "MACD turning up below zero": "MACD turning up below zero",
@@ -98,12 +101,14 @@ with st.sidebar:
         st.caption("Mean reversion: buy after a close below the lower band; sell after a close returns to the middle band. Signals fill at the next session open.")
     if policy == RELATIVE_MOMENTUM_POLICY:
         st.caption("At each completed month-end, rank SPY, QQQ, IWM, DIA, and sector ETFs by 12-month total return. Hold the strongest positive-return ETF only if it is above its 10-month average; otherwise hold cash. Rebalance at the next session open. The symbol field remains the buy-and-hold benchmark.")
+    if policy == REGIME_ROTATION_POLICY:
+        st.caption("Use SPY's 12-month return and 10-month average as the market risk gate. When SPY fails either test, skip equity ETFs and consider SHY, IEF, TLT, and GLD instead. When SPY passes, rotate among the strongest eligible equity ETFs. Signals trade at the next session open.")
     cash_yield = st.number_input("Annual yield while in cash (%)", min_value=0.0, max_value=20.0,
                                  value=0.0, step=0.25, key="cash_yield_pct")
     st.caption("Constant annual effective assumption, compounded per trading day on available cash and paid dividends. Applied to all policies and buy-and-hold; set it to your intended cash yield, or leave at 0%.")
     fee = st.number_input("Commission per share per fill ($)", min_value=0.0, value=0.0, step=0.001, format="%.3f")
     slippage = st.number_input("Adverse slippage per fill (bps)", min_value=0.0, value=5.0, step=1.0)
-    feed = st.selectbox("Alpaca feed", ["iex", "sip"], index=0)
+    feed = st.selectbox("Alpaca feed", ["iex", "sip"], index=1)
     if policy == ACCUMULATION_POLICY and feed == "iex":
         st.warning("IEX volume covers one exchange. Select SIP for broader market-wide volume when your account permits it.")
     run = st.button("Run comparison", type="primary")
@@ -120,8 +125,9 @@ if run:
     warm_start = datetime.combine(start_date - timedelta(days=400), time.min, NY).astimezone(timezone.utc)
     with st.spinner("Loading historical bars and cash distributions from Alpaca…"):
         try:
-            if policy == RELATIVE_MOMENTUM_POLICY:
-                rotation_symbols = list(dict.fromkeys((*ROTATION_UNIVERSE, symbol)))
+            if policy in (RELATIVE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
+                extra_symbols = DEFENSIVE_UNIVERSE if policy == REGIME_ROTATION_POLICY else ()
+                rotation_symbols = list(dict.fromkeys((*ROTATION_UNIVERSE, *extra_symbols, symbol)))
                 rotation_data = fetch_daily_bars_many(rotation_symbols, warm_start, end, feed)
                 rotation_actions = fetch_corporate_actions_many(
                     rotation_symbols, start_date - timedelta(days=400), end_date)
@@ -151,14 +157,16 @@ if run:
         result, trades, ledger = run_accumulation_policy(
             selected, capital, fee, slippage, range_start, distributions, cash_yield,
             base_days, max_base_range, breakout_volume, cmf_threshold)
-    elif policy == RELATIVE_MOMENTUM_POLICY:
+    elif policy in (RELATIVE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
         rotation_frames = {ticker: bars[bars.index >= range_start - pd.Timedelta(days=400)]
                            for ticker, bars in rotation_data.items()}
         rotation_dividends = {ticker: dividend_events(rotation_actions.get(ticker, {}),
                                                        start_date - timedelta(days=400), end_date)
                               for ticker in rotation_frames}
         result, trades, ledger = run_relative_momentum_policy(
-            rotation_frames, symbol, capital, fee, slippage, range_start, rotation_dividends, cash_yield)
+            rotation_frames, symbol, capital, fee, slippage, range_start, rotation_dividends, cash_yield,
+            DEFENSIVE_UNIVERSE if policy == REGIME_ROTATION_POLICY else None,
+            "SPY" if policy == REGIME_ROTATION_POLICY else None)
     elif daily:
         result, trades, ledger = run_daily_policy(selected, capital, policy, fee, slippage, range_start,
                                                   distributions, cash_yield, momentum_dividends,
@@ -185,6 +193,9 @@ if run:
         st.warning("Any cost set to $0 is excluded. Confirm fees and slippage before relying on results.")
     timeframe = "daily bars" if daily else f"{interval}-minute regular-session bars"
     st.caption(f"{len(result):,} {timeframe}, {result.index[0]:%Y-%m-%d} to {result.index[-1]:%Y-%m-%d}; {len(trades)} fill events; {feed.upper()} feed. Prices are split-adjusted.")
+    actual_start = result.index[0].date()
+    if actual_start > start_date + timedelta(days=7):
+        st.warning(f"Requested start: {start_date}. Returned benchmark data begins on {actual_start}; results cover only the returned date range.")
     if policy == SUPERTREND_POLICY:
         st.caption(f"SuperTrend ATR({atr_length}) uses Wilder RMA seeded by the mean of its first {atr_length} true ranges, with multiplier {multiplier:g}; direction starts bearish on the first valid ATR bar. Signals use a completed bar and fill at the next {('session' if daily else 'regular-session')} open. Chart arrows mark signals; circles mark fills. No EOD flattening; final liquidation is at the last close.")
     if policy == "Close above 200-day SMA":
@@ -208,6 +219,8 @@ if run:
         st.caption("Hold QQQ while the completed month-end close is above its 10-month simple moving average. Move to cash only after a completed month closes below it, and re-enter after a later month closes above it. The signal executes at the next trading session open; no intramonth exits.")
     if policy == RELATIVE_MOMENTUM_POLICY:
         st.caption("Rank the ETF universe by trailing 12-month total return at month-end. Hold the top ETF only when its 12-month return is positive and its month-end close is above its 10-month average; otherwise stay in cash. Trades occur at the next session open. The selected symbol is the benchmark.")
+    if policy == REGIME_ROTATION_POLICY:
+        st.caption("At each completed month-end, SPY must have positive 12-month total return and close above its 10-month average for the strategy to hold equities. If either test fails, it rotates to the strongest Treasury or gold ETF with positive 12-month return and price above its 10-month average, or holds cash if none qualify. Trades fill next session open; the selected symbol is the benchmark.")
     st.subheader("Cash distributions (not reinvested)")
     left, right = st.columns(2)
     left.caption("Selected policy")
@@ -266,7 +279,7 @@ if run:
     if trades_df.empty:
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
-    elif policy == RELATIVE_MOMENTUM_POLICY:
+    elif policy in (RELATIVE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
     else:
@@ -276,13 +289,14 @@ if run:
                                  else ("triangle-up", "triangle-down"))
         buys = alt.Chart(trades_df[trades_df.Side == "Buy"]).mark_point(shape=buy_shape, filled=True, size=75, color="#16a34a").encode(x="Fill time:T", y="Price:Q")
         sells = alt.Chart(trades_df[trades_df.Side != "Buy"]).mark_point(shape=sell_shape, filled=True, size=75, color="#dc2626").encode(x="Fill time:T", y="Price:Q")
-    st.subheader(f"{symbol} benchmark price" if policy == RELATIVE_MOMENTUM_POLICY else "Price and fills")
+    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY) else "Price and fills")
     st.altair_chart(line + buys + sells, use_container_width=True)
-    if policy == RELATIVE_MOMENTUM_POLICY:
+    if policy in (RELATIVE_MOMENTUM_POLICY, REGIME_ROTATION_POLICY):
         st.subheader("ETF held by the strategy")
         allocation = alt.Chart(price).mark_line(interpolate="step-after", strokeWidth=2).encode(
             x=alt.X("Time:T", title="Time"),
-            y=alt.Y("rotation_symbol:N", title="Selected ETF", sort=list(ROTATION_UNIVERSE) + [symbol, "CASH"]))
+            y=alt.Y("rotation_symbol:N", title="Selected ETF",
+                    sort=list(ROTATION_UNIVERSE) + list(DEFENSIVE_UNIVERSE) + [symbol, "CASH"]))
         st.altair_chart(allocation, use_container_width=True)
     if policy == "RSI recovery (14, 30/70)":
         rsi_frame = result.reset_index().rename(columns={result.index.name or "index": "Time"})
