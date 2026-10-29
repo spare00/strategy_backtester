@@ -83,7 +83,7 @@ with st.sidebar:
     today = datetime.now(NY).date()
     start_date = st.date_input("Start date", today - timedelta(days=365), max_value=today, key="date_start")
     end_date = st.date_input("End date", today, max_value=today, key="date_end")
-    policy = st.selectbox("Policy", ALL_POLICIES,
+    policy = st.selectbox("Policy", sorted(ALL_POLICIES, key=lambda value: POLICY_LABELS[value].casefold()),
                           format_func=lambda value: POLICY_LABELS[value], key="policy",
                           on_change=_sync_interval_to_policy)
     daily = interval == "Daily"
@@ -246,8 +246,17 @@ if run:
         st.caption("At each completed month-end, SPY must have positive 12-month total return and close above its 10-month average for the strategy to hold equities. If either test fails, it rotates to the strongest Treasury or gold ETF with positive 12-month return and price above its 10-month average, or holds cash if none qualify. Trades fill next session open; the selected symbol is the benchmark.")
     st.subheader("Cash distributions (not reinvested)")
     left, right = st.columns(2)
-    left.caption("Selected policy")
-    left.dataframe(pd.DataFrame(ledger), use_container_width=True, hide_index=True)
+    selected_distributions = pd.DataFrame(ledger)
+    if not selected_distributions.empty:
+        eligible = selected_distributions["Eligible shares"] > 0
+        benchmark_rows = (selected_distributions["Asset"] == symbol if "Asset" in selected_distributions
+                          else pd.Series(False, index=selected_distributions.index))
+        selected_distributions = selected_distributions.loc[eligible | benchmark_rows]
+    left.caption(f"Selected policy distributions + {symbol} benchmark")
+    if selected_distributions.empty:
+        left.info("No eligible cash distributions in this period.")
+    else:
+        left.dataframe(selected_distributions, use_container_width=True, hide_index=True)
     right.caption("Buy and hold")
     right.dataframe(pd.DataFrame(benchmark_ledger), use_container_width=True, hide_index=True)
     price = result.reset_index().rename(columns={result.index.name or "index": "Time"})
