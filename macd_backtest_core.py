@@ -39,7 +39,7 @@ def account_zero_credentials() -> tuple[str, str]:
 def fetch_bars(symbol: str, interval: int, start: datetime, end: datetime, feed: str) -> pd.DataFrame:
     client = StockHistoricalDataClient(*account_zero_credentials())
     request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(interval, TimeFrameUnit.Minute),
-                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT, limit=10000)
+                               start=start, end=end, feed=feed, adjustment=Adjustment.SPLIT)
     bars = client.get_stock_bars(request).data.get(symbol, [])
     if not bars:
         return pd.DataFrame()
