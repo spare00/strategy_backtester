@@ -410,7 +410,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  skip_recent_month: bool = False,
                                  sector_defense: bool = False,
                                  candidate_symbols: tuple[str, ...] | None = None,
-                                 sector_symbols: tuple[str, ...] | None = None
+                                 sector_symbols: tuple[str, ...] | None = None,
+                                 always_invested: bool = False
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
@@ -466,10 +467,11 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                         continue
                     price, trend = month_closes.loc[stamp, symbol], monthly_average.loc[stamp, symbol]
                     current_tr, prior_tr = total_return.loc[momentum_end, symbol], total_return.iloc[prior][symbol]
-                    if pd.isna(price) or pd.isna(trend) or pd.isna(current_tr) or pd.isna(prior_tr) or prior_tr == 0:
+                    if pd.isna(price) or pd.isna(current_tr) or pd.isna(prior_tr) or prior_tr == 0:
                         continue
                     momentum = float(current_tr / prior_tr - 1)
-                    if price > trend and momentum > 0:
+                    trend_pass = pd.notna(trend) and price > trend
+                    if always_invested or (trend_pass and momentum > 0):
                         target = (defensive_candidates if defensive_symbols is not None and
                                   symbol in defensive_symbols else equity_candidates)
                         target[symbol] = momentum
