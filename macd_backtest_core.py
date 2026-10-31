@@ -411,11 +411,16 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  sector_defense: bool = False,
                                  candidate_symbols: tuple[str, ...] | None = None,
                                  sector_symbols: tuple[str, ...] | None = None,
-                                 always_invested: bool = False
+                                 always_invested: bool = False,
+                                 risk_adjusted_alpha: float | None = None,
+                                 ensemble_weights: tuple[float, float, float] | None = None
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
         raise ValueError("top_n must be at least 1")
+    if ensemble_weights is not None and (len(ensemble_weights) != 3 or
+                                         not math.isclose(sum(ensemble_weights), 1.0, abs_tol=1e-9)):
+        raise ValueError("Ensemble weights must contain three values that sum to 1")
     usable = {symbol: frame for symbol, frame in frames.items() if not frame.empty}
     if benchmark_symbol not in usable or not usable:
         return pd.DataFrame(), [], []
@@ -440,6 +445,7 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         if first is not None:
             gross_return.loc[first] = 1.0
         total_return[symbol] = gross_return.cumprod()
+    annualized_volatility = closes.pct_change().rolling(252, min_periods=252).std() * math.sqrt(252)
 
     decisions, decision_dates = pd.Series(index=closes.index, dtype=object), pd.Series(index=closes.index, dtype=object)
     decision_weights = pd.Series(index=closes.index, dtype=float)
@@ -451,7 +457,7 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         if stamp in monthly_average.index and i >= 9 and (not skip_recent_month or i > 0):
             prior = int(closes.index.searchsorted(momentum_end - pd.DateOffset(months=12), side="right")) - 1
             if prior >= 0:
-                equity_candidates, defensive_candidates = {}, {}
+                equity_candidates, defensive_candidates, risk_candidates, ensemble_candidates = {}, {}, {}, {}
                 regime_pass = True
                 if defensive_symbols is not None:
                     regime_pass = False
@@ -471,11 +477,41 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                         continue
                     momentum = float(current_tr / prior_tr - 1)
                     trend_pass = pd.notna(trend) and price > trend
-                    if always_invested or (trend_pass and momentum > 0):
+                    if risk_adjusted_alpha is not None:
+                        volatility = annualized_volatility.loc[stamp, symbol]
+                        if pd.notna(volatility) and volatility > 0:
+                            score = momentum / float(volatility) ** risk_adjusted_alpha
+                            risk_candidates[symbol] = score
+                            if trend_pass:
+                                equity_candidates[symbol] = score
+                    elif ensemble_weights is not None:
+                        period_returns = []
+                        for months in (3, 6, 12):
+                            period_i = int(closes.index.searchsorted(
+                                stamp - pd.DateOffset(months=months), side="right")) - 1
+                            if period_i < 0 or pd.isna(total_return.iloc[period_i][symbol]):
+                                period_returns = []
+                                break
+                            period_base = total_return.iloc[period_i][symbol]
+                            if period_base == 0:
+                                period_returns = []
+                                break
+                            period_returns.append(float(total_return.loc[stamp, symbol] / period_base - 1))
+                        if len(period_returns) == 3:
+                            score = sum(weight * value for weight, value in zip(ensemble_weights, period_returns))
+                            ensemble_candidates[symbol] = score
+                            if trend_pass:
+                                equity_candidates[symbol] = score
+                    elif always_invested or (trend_pass and momentum > 0):
                         target = (defensive_candidates if defensive_symbols is not None and
                                   symbol in defensive_symbols else equity_candidates)
                         target[symbol] = momentum
-                candidates = (equity_candidates if regime_pass else {}) or defensive_candidates
+                if risk_adjusted_alpha is not None:
+                    candidates = equity_candidates or risk_candidates
+                elif ensemble_weights is not None:
+                    candidates = equity_candidates or ensemble_candidates
+                else:
+                    candidates = (equity_candidates if regime_pass else {}) or defensive_candidates
                 if sector_defense:
                     sectors = sector_symbols or ("XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY")
                     qualifying_sectors = [sector for sector in sectors if sector in month_closes and

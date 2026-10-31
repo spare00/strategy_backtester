@@ -1,5 +1,6 @@
 import unittest
 
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from streamlit.testing.v1 import AppTest
@@ -13,6 +14,20 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         app = AppTest.from_file(str(app_path)).run()
         self.assertFalse(app.exception)
         self.assertIn("Monthly ETF relative momentum rotation", app.selectbox(key="policy").options)
+        self.assertIn("Monthly top-3 ETF momentum", app.selectbox(key="policy").options)
+        self.assertIn("Monthly sector ensemble momentum", app.selectbox(key="policy").options)
+        self.assertIn("Monthly sector risk-adjusted momentum", app.selectbox(key="policy").options)
+        self.assertNotIn("Monthly top-3 ETF momentum (always invested)", app.selectbox(key="policy").options)
+        app.selectbox(key="policy").set_value("Monthly top-3 ETF momentum").run()
+        self.assertEqual(app.selectbox(key="top_three_preset").options,
+                         ["Qualified only (cash if none)",
+                          "Always invested (ignore return and SMA filters)"])
+        app.selectbox(key="policy").set_value("Monthly sector ensemble momentum").run()
+        self.assertEqual(app.selectbox(key="ensemble_weight_preset").options,
+                         ["12-month baseline (0/0/100)", "Long-term (20/30/50)",
+                          "Balanced (25/35/40)", "Recent trend (40/40/20)"])
+        app.selectbox(key="policy").set_value("Monthly sector risk-adjusted momentum").run()
+        self.assertEqual(app.selectbox(key="risk_adjusted_alpha_preset").options, ["α=0.5", "α=1.0"])
         app.selectbox(key="policy").set_value("ETF relative momentum rotation").run()
         self.assertEqual(app.selectbox(key="bar_interval").value, "Daily")
 
@@ -32,6 +47,61 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         self.assertEqual(first_buy["Asset"], "AAA")
         self.assertEqual(first_buy["Fill time"], pd.Timestamp("2024-02-01", tz=NY))
         self.assertEqual(result.loc[first_buy["Fill time"], "rotation_symbol"], "AAA")
+
+    def test_risk_adjusted_momentum_prefers_lower_volatility_sector(self):
+        dates = pd.bdate_range("2019-01-02", "2023-12-29", tz=NY)
+        t = np.arange(len(dates))
+
+        def frame(drift, amplitude, frequency):
+            close = 100 * np.cumprod(1 + drift + amplitude * np.sin(t * frequency))
+            return pd.DataFrame({"open": close, "high": close, "low": close, "close": close}, index=dates)
+
+        frames = {
+            "QQQ": frame(0.0002, 0.003, 0.11),
+            "AAA": frame(0.0015, 0.010, 0.16),
+            "BBB": frame(0.0009, 0.0015, 0.09),
+        }
+        start = pd.Timestamp("2021-01-04", tz=NY)
+        baseline = run_relative_momentum_policy(
+            frames, "QQQ", 100_000, 0, 0, start, {}, 0, candidate_symbols=("AAA", "BBB"))[1]
+        self.assertEqual(next(t["Asset"] for t in baseline if t["Side"] == "Buy"), "AAA")
+        for alpha in (0.5, 1.0):
+            adjusted = run_relative_momentum_policy(
+                frames, "QQQ", 100_000, 0, 0, start, {}, 0,
+                candidate_symbols=("AAA", "BBB"), risk_adjusted_alpha=alpha)[1]
+            self.assertEqual(next(t["Asset"] for t in adjusted if t["Side"] == "Buy"), "BBB")
+
+    def test_ensemble_momentum_responds_to_recent_strength(self):
+        dates = pd.bdate_range("2019-01-02", "2022-03-31", tz=NY)
+        month_ends = dates.to_series().groupby(dates.to_period("M")).last().tolist()
+
+        def frame(anchors):
+            positions = [dates.get_indexer([pd.Timestamp(day, tz=NY)], method="nearest")[0]
+                         for day, _ in anchors]
+            values = np.exp(np.interp(np.arange(len(dates)), positions,
+                                      np.log([value for _, value in anchors])))
+            return pd.DataFrame({"open": values, "high": values, "low": values, "close": values},
+                                index=dates)
+
+        anchors = {
+            "AAA": [(month_ends[0].date(), 70), (month_ends[24].date(), 100),
+                    (month_ends[30].date(), 136.36), (month_ends[33].date(), 147.06),
+                    (month_ends[36].date(), 150), (month_ends[-1].date(), 153)],
+            "BBB": [(month_ends[0].date(), 70), (month_ends[24].date(), 100),
+                    (month_ends[30].date(), 103.85), (month_ends[33].date(), 108),
+                    (month_ends[36].date(), 135), (month_ends[-1].date(), 138)],
+            "QQQ": [(month_ends[0].date(), 70), (month_ends[-1].date(), 112)],
+        }
+        frames = {symbol: frame(points) for symbol, points in anchors.items()}
+        start = pd.Timestamp("2022-01-03", tz=NY)
+        baseline = run_relative_momentum_policy(
+            frames, "QQQ", 100_000, 0, 0, start, {}, candidate_symbols=("AAA", "BBB"),
+            ensemble_weights=(0.0, 0.0, 1.0))[0]
+        ensemble = run_relative_momentum_policy(
+            frames, "QQQ", 100_000, 0, 0, start, {}, candidate_symbols=("AAA", "BBB"),
+            ensemble_weights=(0.25, 0.35, 0.40))[0]
+        self.assertEqual(baseline.loc[pd.Timestamp("2022-02-01", tz=NY), "rotation_symbol"], "AAA")
+        self.assertEqual(ensemble.loc[pd.Timestamp("2022-02-01", tz=NY), "rotation_symbol"], "BBB")
 
 
 if __name__ == "__main__":
