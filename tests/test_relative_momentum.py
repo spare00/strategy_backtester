@@ -13,22 +13,29 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         app_path = Path(__file__).resolve().parents[1] / "macd_backtest_app.py"
         app = AppTest.from_file(str(app_path)).run()
         self.assertFalse(app.exception)
-        self.assertIn("Monthly ETF relative momentum rotation", app.selectbox(key="policy").options)
+        self.assertIn("Monthly ETF relative momentum", app.selectbox(key="policy").options)
         self.assertIn("Monthly top-3 ETF momentum", app.selectbox(key="policy").options)
-        self.assertIn("Monthly sector ensemble momentum", app.selectbox(key="policy").options)
-        self.assertIn("Monthly sector risk-adjusted momentum", app.selectbox(key="policy").options)
+        self.assertNotIn("ETF relative momentum rotation", app.selectbox(key="policy").options)
+        self.assertNotIn("Monthly sector ensemble momentum", app.selectbox(key="policy").options)
+        self.assertNotIn("Monthly sector risk-adjusted momentum", app.selectbox(key="policy").options)
         self.assertNotIn("Monthly top-3 ETF momentum (always invested)", app.selectbox(key="policy").options)
+        app.selectbox(key="policy").set_value("Monthly ETF relative momentum").run()
+        presets = app.selectbox(key="relative_momentum_preset").options
+        self.assertIn("12-month baseline (cash if none qualify)", presets)
+        self.assertIn("Always invested (12-month)", presets)
+        self.assertIn("Risk-adjusted α=0.5", presets)
+        self.assertIn("Ensemble Balanced (25/35/40)", presets)
+        self.assertEqual(len(presets), 12)
+        for preset in presets:
+            app.selectbox(key="relative_momentum_preset").set_value(preset).run()
+            self.assertFalse(app.exception, preset)
+        app.selectbox(key="relative_momentum_preset").set_value("Risk-adjusted α=0.5").run()
+        self.assertIn("Risk-adjusted α=0.5", app.subheader[0].value)
         app.selectbox(key="policy").set_value("Monthly top-3 ETF momentum").run()
         self.assertEqual(app.selectbox(key="top_three_preset").options,
                          ["Qualified only (cash if none)",
                           "Always invested (ignore return and SMA filters)"])
-        app.selectbox(key="policy").set_value("Monthly sector ensemble momentum").run()
-        self.assertEqual(app.selectbox(key="ensemble_weight_preset").options,
-                         ["12-month baseline (0/0/100)", "Long-term (20/30/50)",
-                          "Balanced (25/35/40)", "Recent trend (40/40/20)"])
-        app.selectbox(key="policy").set_value("Monthly sector risk-adjusted momentum").run()
-        self.assertEqual(app.selectbox(key="risk_adjusted_alpha_preset").options, ["α=0.5", "α=1.0"])
-        app.selectbox(key="policy").set_value("ETF relative momentum rotation").run()
+        app.selectbox(key="policy").set_value("Monthly ETF relative momentum").run()
         self.assertEqual(app.selectbox(key="bar_interval").value, "Daily")
 
     def test_selects_strongest_eligible_etf_at_next_session_open(self):
