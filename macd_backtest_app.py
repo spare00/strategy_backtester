@@ -353,21 +353,6 @@ if run:
                        if not TOP_THREE_PRESETS[top_three_preset] else
                        "At each completed month-end, rank the same ETF universe by trailing 12-month total return and hold the top three in equal weights, regardless of return sign or their 10-month average.")
         st.caption(f"{description} Rebalance at the next session open; the selected symbol is the benchmark.")
-    st.subheader("Cash distributions (not reinvested)")
-    left, right = st.columns(2)
-    selected_distributions = pd.DataFrame(ledger)
-    if not selected_distributions.empty:
-        eligible = selected_distributions["Eligible shares"] > 0
-        benchmark_rows = (selected_distributions["Asset"] == symbol if "Asset" in selected_distributions
-                          else pd.Series(False, index=selected_distributions.index))
-        selected_distributions = selected_distributions.loc[eligible | benchmark_rows]
-    left.caption(f"Selected policy distributions + {symbol} benchmark")
-    if selected_distributions.empty:
-        left.info("No eligible cash distributions in this period.")
-    else:
-        left.dataframe(selected_distributions, use_container_width=True, hide_index=True)
-    right.caption("Buy and hold")
-    right.dataframe(pd.DataFrame(benchmark_ledger), use_container_width=True, hide_index=True)
     price = result.reset_index().rename(columns={result.index.name or "index": "Time"})
     time_axis = "Time (New York)" if policy == SUPERTREND_POLICY else "Time"
     if policy == SUPERTREND_POLICY:
@@ -516,3 +501,19 @@ if run:
     if not trades_df.empty:
         st.subheader("Fills")
         st.dataframe(trades_df.iloc[::-1].reset_index(drop=True), use_container_width=True, hide_index=True)
+
+    st.subheader("Cash distributions (not reinvested)")
+    left, right = st.columns(2)
+    selected_distributions = pd.DataFrame(ledger)
+    if not selected_distributions.empty:
+        eligible = selected_distributions["Eligible shares"] > 0
+        benchmark_rows = (selected_distributions["Asset"] == symbol if "Asset" in selected_distributions
+                          else pd.Series(False, index=selected_distributions.index))
+        selected_distributions = selected_distributions.loc[eligible | benchmark_rows]
+    left.caption(f"Selected policy distributions + {symbol} benchmark")
+    if selected_distributions.empty:
+        left.info("No eligible cash distributions in this period.")
+    else:
+        left.dataframe(selected_distributions, use_container_width=True, hide_index=True)
+    right.caption("Buy and hold")
+    right.dataframe(pd.DataFrame(benchmark_ledger), use_container_width=True, hide_index=True)
