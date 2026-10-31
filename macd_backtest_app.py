@@ -431,9 +431,27 @@ if run:
                   ALWAYS_INVESTED_MOMENTUM_POLICY,
                   *SECTOR_MOMENTUM_POLICIES):
         st.subheader("ETF held by the strategy")
-        allocation = alt.Chart(price).mark_line(interpolate="step-after", strokeWidth=2).encode(
-            x=alt.X("Time:T", title="Time"),
-            y=alt.Y("rotation_symbol:N", title="Selected ETF", sort="ascending"))
+        if policy == TOP_THREE_MOMENTUM_POLICY:
+            held_rows = []
+            for stamp, holding in price[["Time", "rotation_symbol"]].itertuples(index=False, name=None):
+                symbols = [] if holding == "CASH" else str(holding).split(", ")
+                if not symbols:
+                    symbols = ["CASH"]
+                held_rows.extend({"Time": stamp, "ETF": etf, "Rank": f"Top {rank}"}
+                                 for rank, etf in enumerate(symbols[:3], start=1))
+            allocation = alt.Chart(pd.DataFrame(held_rows)).mark_line(
+                interpolate="step-after", strokeWidth=2
+            ).encode(
+                x=alt.X("Time:T", title="Time"),
+                y=alt.Y("ETF:N", title="Selected ETF", sort="ascending"),
+                color=alt.Color("Rank:N", title="Momentum rank",
+                                scale=alt.Scale(domain=["Top 1", "Top 2", "Top 3"],
+                                                range=["#2563eb", "#16a34a", "#f59e0b"])),
+                detail="Rank:N", order="Time:T")
+        else:
+            allocation = alt.Chart(price).mark_line(interpolate="step-after", strokeWidth=2).encode(
+                x=alt.X("Time:T", title="Time"),
+                y=alt.Y("rotation_symbol:N", title="Selected ETF", sort="ascending"))
         st.altair_chart(allocation, use_container_width=True)
     if policy == "RSI recovery (14, 30/70)":
         rsi_frame = result.reset_index().rename(columns={result.index.name or "index": "Time"})
