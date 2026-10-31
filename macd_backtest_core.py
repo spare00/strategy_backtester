@@ -407,7 +407,10 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  defensive_symbols: tuple[str, ...] | None = None,
                                  regime_symbol: str | None = None,
                                  top_n: int = 1,
-                                 skip_recent_month: bool = False
+                                 skip_recent_month: bool = False,
+                                 sector_defense: bool = False,
+                                 candidate_symbols: tuple[str, ...] | None = None,
+                                 sector_symbols: tuple[str, ...] | None = None
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
@@ -438,7 +441,9 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         total_return[symbol] = gross_return.cumprod()
 
     decisions, decision_dates = pd.Series(index=closes.index, dtype=object), pd.Series(index=closes.index, dtype=object)
+    decision_weights = pd.Series(index=closes.index, dtype=float)
     monthly_average = month_closes.rolling(10, min_periods=10).mean()
+    last_selected = None
     for i, stamp in enumerate(month_ends):
         winners = ()
         momentum_end = month_ends[i - 1] if skip_recent_month and i > 0 else stamp
@@ -457,6 +462,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                        pd.notna(gate_now) and pd.notna(gate_then) and gate_then != 0 and
                                        gate_close > gate_average and gate_now / gate_then - 1 > 0)
                 for symbol in closes.columns:
+                    if candidate_symbols is not None and symbol not in candidate_symbols:
+                        continue
                     price, trend = month_closes.loc[stamp, symbol], monthly_average.loc[stamp, symbol]
                     current_tr, prior_tr = total_return.loc[momentum_end, symbol], total_return.iloc[prior][symbol]
                     if pd.isna(price) or pd.isna(trend) or pd.isna(current_tr) or pd.isna(prior_tr) or prior_tr == 0:
@@ -467,11 +474,29 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                   symbol in defensive_symbols else equity_candidates)
                         target[symbol] = momentum
                 candidates = (equity_candidates if regime_pass else {}) or defensive_candidates
-                if candidates:
+                if sector_defense:
+                    sectors = sector_symbols or ("XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY")
+                    qualifying_sectors = [sector for sector in sectors if sector in month_closes and
+                                          pd.notna(month_closes.loc[stamp, sector]) and
+                                          pd.notna(monthly_average.loc[stamp, sector]) and
+                                          month_closes.loc[stamp, sector] > monthly_average.loc[stamp, sector]]
                     winners = tuple(sorted(candidates, key=candidates.get, reverse=True)[:top_n])
+                    if not qualifying_sectors:
+                        if not winners and last_selected in closes.columns:
+                            winners = (last_selected,)
+                        decision_weights.loc[stamp] = 0.5
+                    else:
+                        decision_weights.loc[stamp] = 1.0
+                    last_selected = winners[0] if winners else None
+                elif candidates:
+                    winners = tuple(sorted(candidates, key=candidates.get, reverse=True)[:top_n])
+                    decision_weights.loc[stamp] = 1.0
+                else:
+                    decision_weights.loc[stamp] = 1.0
         decisions.loc[stamp], decision_dates.loc[stamp] = winners, stamp
     targets = decisions.ffill().shift(1).apply(lambda value: value if isinstance(value, tuple) else ())
     signal_dates = decision_dates.ffill().shift(1)
+    target_weights = decision_weights.ffill().shift(1).fillna(1.0)
 
     start_i = int(index.searchsorted(range_start))
     if start_i >= len(index):
@@ -479,6 +504,7 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
     data = usable[benchmark_symbol].reindex(index).iloc[start_i:].copy()
     aligned = {symbol: frame.reindex(index) for symbol, frame in usable.items()}
     cash, dividend_cash, portfolio = initial_cash, 0.0, {}
+    held_weight = 0.0
     cash_factor = _daily_cash_factor(cash_yield_pct)
     trades, equity, invested, holdings_history = [], [], [], []
     for i in range(start_i, len(index)):
@@ -500,7 +526,10 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         can_switch = all(pd.notna(price) for price in desired_opens.values()) and all(
             pd.notna(price) for price in current_opens.values())
         new_monthly_signal = i > start_i and pd.notna(signal_time) and signal_time != signal_dates.iloc[i - 1]
-        rebalance = set(portfolio) != set(desired) or (top_n > 1 and bool(desired) and new_monthly_signal)
+        desired_weight = float(target_weights.iloc[i])
+        weight_changed = sector_defense and bool(desired) and desired_weight != held_weight
+        rebalance = set(portfolio) != set(desired) or weight_changed or (
+            bool(desired) and new_monthly_signal and top_n > 1)
         if rebalance and can_switch:
             for symbol, quantity in portfolio.items():
                 price = float(current_opens[symbol]) * (1 - slippage_bps / 10000)
@@ -508,8 +537,9 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                 trades.append({"Asset": symbol, "Side": "Sell", "Signal time": signal_time,
                                "Fill time": stamp, "Price": price, "Shares": quantity})
             portfolio = {}
+            held_weight = desired_weight if desired else 0.0
             if desired:
-                allocation = cash / len(desired)
+                allocation = cash * desired_weight / len(desired)
                 for symbol in desired:
                     price = float(desired_opens[symbol]) * (1 + slippage_bps / 10000)
                     quantity = int(allocation / (price + fee_per_share))
