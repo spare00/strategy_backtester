@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from macd_backtest_core import (NY, dividend_events, fetch_bars, fetch_corporate_actions,
-                                fetch_corporate_actions_many, fetch_daily_bars, fetch_daily_bars_many,
+                                fetch_corporate_actions_many, fetch_daily_bars, fetch_daily_bars_many, fetch_ibkr_daily_bars_many,
                                 run_accumulation_policy, run_buy_hold, run_daily_policy, run_policy,
                                 run_relative_momentum_policy, run_rsi_policy, run_supertrend_policy)
 
@@ -92,8 +92,8 @@ def _sync_policy_to_interval() -> None:
 
 st.set_page_config(page_title="Historical Strategy Backtest", layout="wide")
 st.title("Historical Strategy Comparison")
-st.caption("Historical Alpaca bars only. Simulated trades do not submit orders.")
-st.info("Bars are split-adjusted. Dividends are held as cash, based on shares carried past the prior session close; they are credited on payment date. Amounts are gross before tax or withholding. Corporate-action records may be delayed.")
+st.caption("Historical market data only. Simulated trades do not submit orders.")
+st.info("Prices are split-adjusted. Alpaca mode includes cash distributions; IBKR mode excludes dividend income.")
 
 POLICY_OPTIONS = sorted(ALL_POLICIES, key=lambda value: POLICY_LABELS[value].casefold())
 st.session_state.setdefault("policy", POLICY_OPTIONS[0])
@@ -136,8 +136,10 @@ with st.sidebar:
                             format_func=lambda n: "Daily" if n == "Daily" else f"{n} minute" if n == 1 else f"{n} minutes",
                             key="bar_interval", on_change=_sync_policy_to_interval)
     today = datetime.now(NY).date()
-    start_date = st.date_input("Start date", today - timedelta(days=365), max_value=today, key="date_start")
-    end_date = st.date_input("End date", today, max_value=today, key="date_end")
+    start_date = st.date_input("Start date", today - timedelta(days=365),
+                               min_value=date(1998, 1, 1), max_value=today, key="date_start")
+    end_date = st.date_input("End date", today, min_value=date(1998, 1, 1),
+                             max_value=today, key="date_end")
     policy = st.selectbox("Policy", POLICY_OPTIONS,
                           format_func=lambda value: POLICY_LABELS[value], key="policy",
                           on_change=_sync_interval_to_policy)
@@ -193,11 +195,12 @@ with st.sidebar:
                                         key="top_three_preset")
     cash_yield = st.number_input("Annual yield while in cash (%)", min_value=0.0, max_value=20.0,
                                  value=0.0, step=0.25, key="cash_yield_pct")
-    st.caption("Constant annual effective assumption, compounded per trading day on available cash and paid dividends. Applied to all policies and buy-and-hold; set it to your intended cash yield, or leave at 0%.")
+    st.caption("Constant annual effective assumption, compounded per trading day on available cash. Applied to all policies and buy-and-hold; set it to your intended cash yield, or leave at 0%.")
     fee = st.number_input("Commission per share per fill ($)", min_value=0.0, value=0.0, step=0.001, format="%.3f")
     slippage = st.number_input("Adverse slippage per fill (bps)", min_value=0.0, value=5.0, step=1.0)
-    feed = st.selectbox("Alpaca feed", ["iex", "sip"], index=1)
-    if policy == ACCUMULATION_POLICY and feed == "iex":
+    data_source = st.selectbox("Historical data source", ["IBKR Gateway", "Alpaca"], index=0)
+    feed = st.selectbox("Alpaca feed", ["iex", "sip"], index=1, disabled=data_source != "Alpaca")
+    if policy == ACCUMULATION_POLICY and data_source == "Alpaca" and feed == "iex":
         st.warning("IEX volume covers one exchange. Select SIP for broader market-wide volume when your account permits it.")
     run = st.button("Run comparison", type="primary")
 
@@ -218,7 +221,10 @@ if run:
     start = datetime.combine(start_date, time.min, NY).astimezone(timezone.utc)
     end = min(datetime.combine(end_date + timedelta(days=1), time.min, NY).astimezone(timezone.utc), datetime.now(timezone.utc) - timedelta(minutes=20))
     warm_start = datetime.combine(start_date - timedelta(days=400), time.min, NY).astimezone(timezone.utc)
-    with st.spinner("Loading historical bars and cash distributions from Alpaca…"):
+    if data_source == "IBKR Gateway" and not daily:
+        st.error("IBKR mode currently provides daily bars only. Select Daily or switch the data source to Alpaca for intraday tests.")
+        st.stop()
+    with st.spinner(f"Loading historical bars from {data_source}…"):
         try:
             if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY):
                 extra_symbols = DEFENSIVE_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "regime" else ()
@@ -228,17 +234,26 @@ if run:
                             ROTATION_UNIVERSE + SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "sector_defense" else
                             ROTATION_UNIVERSE)
                 rotation_symbols = list(dict.fromkeys((*universe, *extra_symbols, symbol)))
-                rotation_data = fetch_daily_bars_many(rotation_symbols, warm_start, end, feed)
-                rotation_actions = fetch_corporate_actions_many(
-                    rotation_symbols, start_date - timedelta(days=400), end_date)
+                if data_source == "IBKR Gateway":
+                    rotation_data = fetch_ibkr_daily_bars_many(rotation_symbols, warm_start, end)
+                    rotation_actions = {}
+                else:
+                    rotation_data = fetch_daily_bars_many(rotation_symbols, warm_start, end, feed)
+                    rotation_actions = fetch_corporate_actions_many(
+                        rotation_symbols, start_date - timedelta(days=400), end_date)
                 frame = rotation_data.get(symbol, pd.DataFrame())
                 actions = rotation_actions.get(symbol, {})
             else:
                 rotation_data = rotation_actions = None
-                frame = fetch_daily_bars(symbol, warm_start, end, feed) if daily else fetch_bars(symbol, interval, warm_start, end, feed)
-                actions = fetch_corporate_actions(symbol, start_date - timedelta(days=400), end_date)
+                if data_source == "IBKR Gateway":
+                    rotation_data = fetch_ibkr_daily_bars_many([symbol], warm_start, end)
+                    frame = rotation_data.get(symbol, pd.DataFrame())
+                    actions = {}
+                else:
+                    frame = fetch_daily_bars(symbol, warm_start, end, feed) if daily else fetch_bars(symbol, interval, warm_start, end, feed)
+                    actions = fetch_corporate_actions(symbol, start_date - timedelta(days=400), end_date)
         except Exception as exc:
-            st.error(f"Alpaca data request failed: {exc}")
+            st.error(f"{data_source} data request failed: {exc}")
             st.stop()
     range_start = pd.Timestamp(datetime.combine(start_date, time.min, NY))
     selected = frame[frame.index >= range_start - pd.Timedelta(days=400)]
@@ -260,9 +275,10 @@ if run:
     elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY):
         rotation_frames = {ticker: bars[bars.index >= range_start - pd.Timedelta(days=400)]
                            for ticker, bars in rotation_data.items()}
-        rotation_dividends = {ticker: dividend_events(rotation_actions.get(ticker, {}),
+        rotation_dividends = ({ticker: [] for ticker in rotation_frames} if data_source == "IBKR Gateway" else
+                              {ticker: dividend_events(rotation_actions.get(ticker, {}),
                                                        start_date - timedelta(days=400), end_date)
-                              for ticker in rotation_frames}
+                               for ticker in rotation_frames})
         result, trades, ledger = run_relative_momentum_policy(
             rotation_frames, symbol, capital, fee, slippage, range_start, rotation_dividends, cash_yield,
             DEFENSIVE_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "regime" else None,
@@ -302,7 +318,10 @@ if run:
     if fee == 0 or slippage == 0:
         st.warning("Any cost set to $0 is excluded. Confirm fees and slippage before relying on results.")
     timeframe = "daily bars" if daily else f"{interval}-minute regular-session bars"
-    st.caption(f"{len(result):,} {timeframe}, {result.index[0]:%Y-%m-%d} to {result.index[-1]:%Y-%m-%d}; {len(trades)} fill events; {feed.upper()} feed. Prices are split-adjusted.")
+    source_label = "IBKR Gateway TRADES (split-adjusted; dividends excluded)" if data_source == "IBKR Gateway" else f"Alpaca {feed.upper()} (split-adjusted)"
+    st.caption(f"{len(result):,} {timeframe}, {result.index[0]:%Y-%m-%d} to {result.index[-1]:%Y-%m-%d}; {len(trades)} fill events; {source_label}.")
+    if data_source == "IBKR Gateway":
+        st.info("IBKR TRADES bars include split adjustments but exclude dividends. Strategy and benchmark values do not include dividend income.")
     actual_start = result.index[0].date()
     if actual_start > start_date + timedelta(days=7):
         st.warning(f"Requested start: {start_date}. Returned benchmark data begins on {actual_start}; results cover only the returned date range.")

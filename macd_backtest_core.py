@@ -63,6 +63,44 @@ def fetch_daily_bars(symbol: str, start: datetime, end: datetime, feed: str) -> 
     return frame
 
 
+def fetch_ibkr_daily_bars_many(symbols: list[str], start: datetime, end: datetime) -> dict[str, pd.DataFrame]:
+    """Fetch split-adjusted daily TRADES bars from the local, read-only IB Gateway."""
+    import asyncio
+    import os
+
+    from ib_async import IB, Stock
+
+    async def fetch() -> dict[str, pd.DataFrame]:
+        ib = IB()
+        await ib.connectAsync(os.getenv("IBKR_HOST", "127.0.0.1"),
+                              int(os.getenv("IBKR_PORT", "4002")),
+                              clientId=int(os.getenv("IBKR_BACKTEST_CLIENT_ID", "79")),
+                              readonly=True, timeout=15)
+        try:
+            contracts = [Stock(symbol, "SMART", "USD") for symbol in dict.fromkeys(symbols)]
+            qualified = await ib.qualifyContractsAsync(*contracts)
+            result = {}
+            for symbol, contract in zip(dict.fromkeys(symbols), qualified):
+                bars = await ib.reqHistoricalDataAsync(
+                    contract, endDateTime="", durationStr="30 Y", barSizeSetting="1 day",
+                    whatToShow="TRADES", useRTH=True, formatDate=1)
+                if bars:
+                    frame = pd.DataFrame([{"date": pd.Timestamp(bar.date).date(),
+                                           "open": float(bar.open), "high": float(bar.high),
+                                           "low": float(bar.low), "close": float(bar.close),
+                                           "volume": int(bar.volume)} for bar in bars])
+                    frame = frame.set_index("date").sort_index()
+                    frame.index = pd.DatetimeIndex(pd.to_datetime(frame.index)).tz_localize(NY)
+                    first = pd.Timestamp(start).tz_convert(NY).normalize()
+                    last = pd.Timestamp(end).tz_convert(NY).normalize()
+                    result[symbol] = frame[(frame.index >= first) & (frame.index <= last)]
+            return result
+        finally:
+            ib.disconnect()
+
+    return asyncio.run(fetch())
+
+
 def fetch_daily_bars_many(symbols: list[str], start: datetime, end: datetime, feed: str) -> dict[str, pd.DataFrame]:
     client = StockHistoricalDataClient(*account_zero_credentials())
     result = {}

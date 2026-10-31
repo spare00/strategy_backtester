@@ -1,10 +1,10 @@
 # Historical Strategy Backtester
 
-Independent Streamlit app for retrospective comparisons of multiple trading strategies and symbols. The app requests historical Alpaca bars and corporate actions only; it does not submit orders.
+Independent Streamlit app for retrospective comparisons of multiple trading strategies and symbols. The app requests historical bars from the local IBKR Gateway by default, with Alpaca as an alternate source; it does not submit orders.
 
 ## First-time setup
 
-Run these commands from a terminal. The app needs Python 3 and Alpaca market-data credentials; it only requests historical data and does not submit orders.
+Run these commands from a terminal. The app needs Python 3. IBKR mode requires a running, API-enabled IB Gateway (default 127.0.0.1:4002); Alpaca mode requires credentials in `.env`. It only requests historical data and does not submit orders.
 
 ```bash
 cd ~/git/strategy_backtester
@@ -13,7 +13,7 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Create `.env` only if it does not already exist, then add the Alpaca API key and secret for account `accn_0` using the names shown in `.env.example`:
+For Alpaca mode, create `.env` only if it does not already exist, then add the Alpaca API key and secret for account `accn_0` using the names shown in `.env.example`:
 
 ```bash
 cp .env.example .env  # only when .env is missing
@@ -36,6 +36,8 @@ cd ~/git/strategy_backtester
 source .venv/bin/activate
 streamlit run macd_backtest_app.py
 ```
+
+IBKR mode currently uses split-adjusted daily `TRADES` bars, excludes dividend income, and uses SMART-routed contracts. It requests the available daily history (up to 30 years); each ETF enters the candidate set only when its own history exists. Intraday policies require Alpaca mode.
 
 The app includes intraday MACD, daily SMA, RSI, Bollinger Band mean reversion, a monthly 10-month SMA risk filter, monthly ETF relative-momentum rotation, SuperTrend, monthly 12-month absolute momentum, and an accumulation-breakout proxy. The relative-momentum policy rotates among index and sector ETFs based on trailing 12-month total return, with a 10-month moving-average trend filter; the selected symbol is its buy-and-hold benchmark. The Bollinger policy defaults to a 20-session average with 2 standard deviations, buying below the lower band and exiting at the middle band. The monthly filter changes between QQQ and cash only after a completed month closes across the 10-month average. The accumulation proxy looks for a tight 60-session base, positive 20-day Chaikin Money Flow, then a breakout on elevated volume. It does not identify the buyer. For broader volume coverage, select the SIP feed when available; IEX covers one exchange.
 
