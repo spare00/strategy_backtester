@@ -484,7 +484,7 @@ if run:
             allocation = alt.Chart(held_data).mark_line(
                 interpolate="step-after", strokeWidth=2
             ).encode(
-                x=alt.X("Time:T", title="Time"),
+                x=alt.X("Time:T", title=None),
                 y=alt.Y("ETF:N", title=None, sort=etf_names,
                         axis=alt.Axis(labels=False, ticks=False, domain=False)),
                 color=alt.Color("Rank:N", title="Position",
@@ -497,7 +497,7 @@ if run:
                 columns={"rotation_symbol": "ETF"})
             etf_names = sorted(held_data["ETF"].dropna().unique())
             allocation = alt.Chart(held_data).mark_line(interpolate="step-after", strokeWidth=2).encode(
-                x=alt.X("Time:T", title="Time"),
+                x=alt.X("Time:T", title=None),
                 y=alt.Y("ETF:N", title=None, sort=etf_names,
                         axis=alt.Axis(labels=False, ticks=False, domain=False)))
         label_data = pd.DataFrame({"ETF": etf_names})
@@ -507,8 +507,7 @@ if run:
             align="right", baseline="middle", color="#e5e7eb", fontSize=11
         ).encode(
             y=alt.Y("ETF:N", sort=etf_names,
-                    axis=alt.Axis(labels=False, ticks=False, domain=False,
-                                  title="Selected ETF", titleColor="#e5e7eb")),
+                    axis=alt.Axis(labels=False, ticks=False, domain=False, title=None)),
             text="ETF:N",
             tooltip=[alt.Tooltip("ETF:N", title="ETF"),
                      alt.Tooltip("Description:N", title="설명")])
