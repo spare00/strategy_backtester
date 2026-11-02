@@ -486,7 +486,7 @@ if run:
             ).encode(
                 x=alt.X("Time:T", title=None),
                 y=alt.Y("ETF:N", title=None, sort=etf_names,
-                        axis=alt.Axis(labels=False, ticks=False, domain=False)),
+                        axis=alt.Axis(ticks=False, domain=False)),
                 color=alt.Color("Rank:N", title="Position",
                                 scale=alt.Scale(domain=( ["12-month core", "3-month sleeve"] if recovery_chart else
                                                          ["Top 1", "Top 2", "Top 3"]),
@@ -499,23 +499,8 @@ if run:
             allocation = alt.Chart(held_data).mark_line(interpolate="step-after", strokeWidth=2).encode(
                 x=alt.X("Time:T", title=None),
                 y=alt.Y("ETF:N", title=None, sort=etf_names,
-                        axis=alt.Axis(labels=False, ticks=False, domain=False)))
-        label_data = pd.DataFrame({"ETF": etf_names})
-        label_data["Description"] = label_data["ETF"].map(
-            lambda etf: ETF_DESCRIPTIONS.get(etf, "ETF"))
-        etf_labels = alt.Chart(label_data).mark_text(
-            align="right", baseline="middle", color="#e5e7eb", fontSize=11
-        ).encode(
-            y=alt.Y("ETF:N", sort=etf_names,
-                    axis=alt.Axis(labels=False, ticks=False, domain=False, title=None)),
-            text="ETF:N",
-            tooltip=[alt.Tooltip("ETF:N", title="ETF"),
-                     alt.Tooltip("Description:N", title="설명")])
-        st.altair_chart(
-            alt.hconcat(etf_labels.properties(width=75, height=280),
-                        allocation.properties(width=850, height=280), spacing=4)
-            .resolve_scale(y="shared"),
-            use_container_width=True)
+                        axis=alt.Axis(ticks=False, domain=False)))
+        st.altair_chart(allocation, use_container_width=True)
     if policy == "RSI recovery (14, 30/70)":
         rsi_frame = result.reset_index().rename(columns={result.index.name or "index": "Time"})
         signal_points = rsi_frame[rsi_frame.rsi_buy | rsi_frame.rsi_sell].copy()
