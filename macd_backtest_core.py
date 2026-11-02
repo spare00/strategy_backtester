@@ -66,9 +66,14 @@ def fetch_daily_bars(symbol: str, start: datetime, end: datetime, feed: str) -> 
 def fetch_ibkr_daily_bars_many(symbols: list[str], start: datetime, end: datetime) -> dict[str, pd.DataFrame]:
     """Fetch split-adjusted daily TRADES bars from the local, read-only IB Gateway."""
     import asyncio
+    import math
     import os
 
     from ib_async import IB, Stock
+
+    days = max(1, (end.date() - start.date()).days + 1)
+    duration = f"{days} D" if days <= 365 else f"{math.ceil(days / 365)} Y"
+    end_time = end.strftime("%Y%m%d %H:%M:%S UTC")
 
     async def fetch() -> dict[str, pd.DataFrame]:
         ib = IB()
@@ -81,9 +86,16 @@ def fetch_ibkr_daily_bars_many(symbols: list[str], start: datetime, end: datetim
             qualified = await ib.qualifyContractsAsync(*contracts)
             result = {}
             for symbol, contract in zip(dict.fromkeys(symbols), qualified):
-                bars = await ib.reqHistoricalDataAsync(
-                    contract, endDateTime="", durationStr="30 Y", barSizeSetting="1 day",
-                    whatToShow="TRADES", useRTH=True, formatDate=1)
+                for attempt in range(3):
+                    try:
+                        bars = await ib.reqHistoricalDataAsync(
+                            contract, endDateTime=end_time, durationStr=duration, barSizeSetting="1 day",
+                            whatToShow="TRADES", useRTH=True, formatDate=1)
+                        break
+                    except Exception:
+                        if attempt == 2:
+                            raise
+                        await asyncio.sleep(2 ** attempt)
                 if bars:
                     frame = pd.DataFrame([{"date": pd.Timestamp(bar.date).date(),
                                            "open": float(bar.open), "high": float(bar.high),
@@ -451,7 +463,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  sector_symbols: tuple[str, ...] | None = None,
                                  always_invested: bool = False,
                                  risk_adjusted_alpha: float | None = None,
-                                 ensemble_weights: tuple[float, float, float] | None = None
+                                 ensemble_weights: tuple[float, float, float] | None = None,
+                                 recovery_sleeve: bool = False
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
@@ -487,15 +500,20 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
 
     decisions, decision_dates = pd.Series(index=closes.index, dtype=object), pd.Series(index=closes.index, dtype=object)
     decision_weights = pd.Series(index=closes.index, dtype=float)
+    decision_allocations = pd.Series(index=closes.index, dtype=object)
     monthly_average = month_closes.rolling(10, min_periods=10).mean()
     last_selected = None
+    recovery_active = False
     for i, stamp in enumerate(month_ends):
         winners = ()
+        winner_allocations = {}
         momentum_end = month_ends[i - 1] if skip_recent_month and i > 0 else stamp
         if stamp in monthly_average.index and i >= 9 and (not skip_recent_month or i > 0):
             prior = int(closes.index.searchsorted(momentum_end - pd.DateOffset(months=12), side="right")) - 1
             if prior >= 0:
                 equity_candidates, defensive_candidates, risk_candidates, ensemble_candidates = {}, {}, {}, {}
+                candidates = {}
+                recovery_core_candidates, recovery_fast_candidates = {}, {}
                 regime_pass = True
                 if defensive_symbols is not None:
                     regime_pass = False
@@ -515,7 +533,19 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                         continue
                     momentum = float(current_tr / prior_tr - 1)
                     trend_pass = pd.notna(trend) and price > trend
-                    if risk_adjusted_alpha is not None:
+                    if recovery_sleeve:
+                        recovery_core_candidates[symbol] = momentum
+                        if symbol in (sector_symbols or ()) and trend_pass:
+                            fast_prior = int(closes.index.searchsorted(
+                                stamp - pd.DateOffset(months=3), side="right")) - 1
+                            if fast_prior >= 0:
+                                fast_base = total_return.iloc[fast_prior][symbol]
+                                fast_now = total_return.loc[stamp, symbol]
+                                if pd.notna(fast_base) and fast_base != 0 and pd.notna(fast_now):
+                                    fast_return = float(fast_now / fast_base - 1)
+                                    if fast_return > 0:
+                                        recovery_fast_candidates[symbol] = fast_return
+                    elif risk_adjusted_alpha is not None:
                         volatility = annualized_volatility.loc[stamp, symbol]
                         if pd.notna(volatility) and volatility > 0:
                             score = momentum / float(volatility) ** risk_adjusted_alpha
@@ -544,7 +574,39 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                         target = (defensive_candidates if defensive_symbols is not None and
                                   symbol in defensive_symbols else equity_candidates)
                         target[symbol] = momentum
-                if risk_adjusted_alpha is not None:
+                if recovery_sleeve:
+                    core = sorted(recovery_core_candidates, key=recovery_core_candidates.get, reverse=True)
+                    if core:
+                        core_winner = core[0]
+                        benchmark_close = month_closes.loc[stamp, benchmark_symbol]
+                        benchmark_average = monthly_average.loc[stamp, benchmark_symbol]
+                        crossed_up = False
+                        if i > 0 and pd.notna(benchmark_close) and pd.notna(benchmark_average):
+                            previous_close = month_closes.iloc[i - 1][benchmark_symbol]
+                            previous_average = monthly_average.iloc[i - 1][benchmark_symbol]
+                            prior_benchmark_return = total_return.loc[month_ends[i - 1], benchmark_symbol]
+                            current_benchmark_return = total_return.loc[stamp, benchmark_symbol]
+                            crossed_up = (pd.notna(previous_close) and pd.notna(previous_average) and
+                                          pd.notna(prior_benchmark_return) and prior_benchmark_return != 0 and
+                                          pd.notna(current_benchmark_return) and
+                                          previous_close <= previous_average and benchmark_close > benchmark_average and
+                                          current_benchmark_return / prior_benchmark_return - 1 > 0)
+                        if pd.notna(benchmark_close) and pd.notna(benchmark_average):
+                            if benchmark_close <= benchmark_average:
+                                recovery_active = False
+                            elif crossed_up:
+                                recovery_active = True
+                        winners = (core_winner,)
+                        winner_allocations = {core_winner: 1.0}
+                        if recovery_active and recovery_fast_candidates:
+                            fast_winner = max(recovery_fast_candidates, key=recovery_fast_candidates.get)
+                            if fast_winner == core_winner:
+                                winner_allocations = {core_winner: 1.0}
+                            else:
+                                winners = (core_winner, fast_winner)
+                                winner_allocations = {core_winner: 0.70, fast_winner: 0.30}
+                        decision_weights.loc[stamp] = 1.0
+                elif risk_adjusted_alpha is not None:
                     candidates = equity_candidates or risk_candidates
                 elif ensemble_weights is not None:
                     candidates = equity_candidates or ensemble_candidates
@@ -569,10 +631,15 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                     decision_weights.loc[stamp] = 1.0
                 else:
                     decision_weights.loc[stamp] = 1.0
+                if winners and not winner_allocations:
+                    winner_allocations = {symbol: 1.0 / len(winners) for symbol in winners}
         decisions.loc[stamp], decision_dates.loc[stamp] = winners, stamp
+        if winner_allocations:
+            decision_allocations.loc[stamp] = winner_allocations
     targets = decisions.ffill().shift(1).apply(lambda value: value if isinstance(value, tuple) else ())
     signal_dates = decision_dates.ffill().shift(1)
     target_weights = decision_weights.ffill().shift(1).fillna(1.0)
+    target_allocations = decision_allocations.ffill().shift(1)
 
     start_i = int(index.searchsorted(range_start))
     if start_i >= len(index):
@@ -596,6 +663,9 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                     dividend_cash += event["amount"]
                     event["paid"] = True
         desired = targets.iloc[i]
+        desired_allocations = target_allocations.iloc[i]
+        if not isinstance(desired_allocations, dict):
+            desired_allocations = {symbol: 1.0 / len(desired) for symbol in desired} if desired else {}
         signal_time = signal_dates.iloc[i] if pd.notna(signal_dates.iloc[i]) else index[max(i - 1, 0)]
         desired_opens = {symbol: aligned[symbol].loc[stamp, "open"] for symbol in desired}
         current_opens = {symbol: aligned[symbol].loc[stamp, "open"] for symbol in portfolio}
@@ -605,7 +675,7 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
         desired_weight = float(target_weights.iloc[i])
         weight_changed = sector_defense and bool(desired) and desired_weight != held_weight
         rebalance = set(portfolio) != set(desired) or weight_changed or (
-            bool(desired) and new_monthly_signal and top_n > 1)
+            bool(desired) and new_monthly_signal and (top_n > 1 or recovery_sleeve))
         if rebalance and can_switch:
             for symbol, quantity in portfolio.items():
                 price = float(current_opens[symbol]) * (1 - slippage_bps / 10000)
@@ -615,8 +685,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
             portfolio = {}
             held_weight = desired_weight if desired else 0.0
             if desired:
-                allocation = cash * desired_weight / len(desired)
                 for symbol in desired:
+                    allocation = cash * desired_weight * desired_allocations.get(symbol, 0.0)
                     price = float(desired_opens[symbol]) * (1 + slippage_bps / 10000)
                     quantity = int(allocation / (price + fee_per_share))
                     if quantity:

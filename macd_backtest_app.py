@@ -40,6 +40,7 @@ SECTOR_MOMENTUM_POLICIES = (RISK_ADJUSTED_MOMENTUM_POLICY, ENSEMBLE_MOMENTUM_POL
 RELATIVE_MOMENTUM_PRESETS = {
     "12-month baseline (cash if none qualify)": {"mode": "baseline"},
     "Always invested (12-month)": {"mode": "always_invested"},
+    "Recovery sleeve (70% 12-month + 30% 3-month)": {"mode": "recovery_sleeve"},
     "Expanded industry universe": {"mode": "expanded_industries"},
     "12–1 momentum (skip latest month)": {"mode": "skip_month"},
     "SPY regime filter + defensive ETFs": {"mode": "regime"},
@@ -54,6 +55,48 @@ ROTATION_UNIVERSE = ("SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLY", "XLI", "XL
 SECTOR_UNIVERSE = ("XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY")
 INDUSTRY_UNIVERSE = ("KBE", "KRE", "KCE", "KIE", "XAR", "XTN", "XBI", "XPH", "XHE", "XHS",
                      "XOP", "XES", "XME", "XRT", "XHB", "XSD", "XSW", "XWEB", "XTH")
+ETF_DESCRIPTIONS = {
+    "CASH": "현금",
+    "SPY": "S&P 500 대형주",
+    "QQQ": "나스닥 100 대형 비금융주",
+    "IWM": "미국 소형주",
+    "DIA": "다우존스 산업평균 구성 종목",
+    "XLB": "소재",
+    "XLC": "커뮤니케이션 서비스",
+    "XLE": "에너지",
+    "XLF": "금융",
+    "XLI": "산업재",
+    "XLK": "정보기술",
+    "XLP": "필수소비재",
+    "XLRE": "부동산",
+    "XLU": "유틸리티",
+    "XLV": "헬스케어",
+    "XLY": "임의소비재",
+    "SMH": "반도체 기업 및 장비",
+    "KBE": "은행",
+    "KRE": "지역 은행",
+    "KCE": "자본시장 기업",
+    "KIE": "보험",
+    "XAR": "항공우주 및 방위산업",
+    "XTN": "운송",
+    "XBI": "바이오테크",
+    "XPH": "제약",
+    "XHE": "헬스케어 장비 및 용품",
+    "XHS": "헬스케어 서비스",
+    "XOP": "석유·가스 탐사 및 생산",
+    "XES": "석유·가스 장비 및 서비스",
+    "XME": "금속 및 광업",
+    "XRT": "소매",
+    "XHB": "주택 건설",
+    "XSD": "반도체",
+    "XSW": "소프트웨어",
+    "XWEB": "인터넷 및 전자상거래",
+    "XTH": "기술 하드웨어",
+    "SHY": "미국 단기 국채",
+    "IEF": "미국 중기 국채",
+    "TLT": "미국 장기 국채",
+    "GLD": "금",
+}
 DEFENSIVE_UNIVERSE = ("SHY", "IEF", "TLT", "GLD")
 DAILY_POLICIES = ("Close above 200-day SMA", "50/200-day SMA cross", "RSI recovery (14, 30/70)",
                   BOLLINGER_POLICY, MONTHLY_TREND_POLICY, RELATIVE_MOMENTUM_POLICY,
@@ -166,13 +209,15 @@ with st.sidebar:
         bollinger_stddev = st.number_input("Bollinger standard deviations", min_value=0.5, max_value=4.0, value=2.0, step=0.1, key="bollinger_stddev")
         st.caption("Mean reversion: buy after a close below the lower band; sell after a close returns to the middle band. Signals fill at the next session open.")
     if policy == RELATIVE_MOMENTUM_POLICY:
-        relative_preset = st.selectbox("Momentum strategy preset", tuple(RELATIVE_MOMENTUM_PRESETS),
+        relative_preset_names = tuple(sorted(RELATIVE_MOMENTUM_PRESETS))
+        relative_preset = st.selectbox("Momentum strategy preset", relative_preset_names,
                                        key="relative_momentum_preset")
         momentum_config = RELATIVE_MOMENTUM_PRESETS[relative_preset]
         mode = momentum_config["mode"]
         descriptions = {
             "baseline": "Rank SPY, QQQ, IWM, DIA, and sector ETFs by trailing 12-month total return. Hold the strongest positive-return ETF only when it is above its 10-month average; otherwise hold cash.",
             "always_invested": "Use the same broad ETF universe and 12-month ranking, but always hold the top ETF even when its return is negative or it is below its 10-month average.",
+            "recovery_sleeve": ("Always hold the top ETF by 12-month return. After the benchmark crosses back above its 10-month average from below with a positive one-month return, allocate 70% to that 12-month leader and 30% to the strongest sector ETF with positive 3-month return above its 10-month average. Keep the sleeve active until the benchmark closes below its 10-month average; if no sector qualifies, stay 100% in the 12-month leader."),
             "expanded_industries": "Expand the baseline universe with industry ETFs for areas such as banks, biotech, retail, homebuilders, transportation, semiconductors, and software; apply the baseline return and 10-month average filters.",
             "skip_month": "Use the baseline universe and filters, but rank by 12-month return ending at the prior month-end, skipping the latest month.",
             "regime": "Use the baseline universe and require SPY to have positive 12-month return and be above its 10-month average. If it fails, rotate to qualifying Treasury or gold ETFs, or hold cash.",
@@ -227,7 +272,8 @@ if run:
     with st.spinner(f"Loading historical bars from {data_source}…"):
         try:
             if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY):
-                extra_symbols = DEFENSIVE_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "regime" else ()
+                extra_symbols = (DEFENSIVE_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "regime" else
+                                 SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve" else ())
                 universe = (ROTATION_UNIVERSE + INDUSTRY_UNIVERSE
                             if policy == RELATIVE_MOMENTUM_POLICY and mode == "expanded_industries" else
                             SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode in ("risk_adjusted", "ensemble") else
@@ -288,11 +334,12 @@ if run:
             sector_defense=policy == RELATIVE_MOMENTUM_POLICY and mode == "sector_defense",
             candidate_symbols=(SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode in ("risk_adjusted", "ensemble") else
                                (*ROTATION_UNIVERSE, symbol) if policy == RELATIVE_MOMENTUM_POLICY and mode == "sector_defense" else None),
-            sector_symbols=SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "sector_defense" else None,
+            sector_symbols=SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode in ("sector_defense", "recovery_sleeve") else None,
             always_invested=((policy == RELATIVE_MOMENTUM_POLICY and mode == "always_invested") or
                              (policy == TOP_THREE_MOMENTUM_POLICY and TOP_THREE_PRESETS[top_three_preset])),
             risk_adjusted_alpha=momentum_config.get("alpha") if policy == RELATIVE_MOMENTUM_POLICY else None,
-            ensemble_weights=momentum_config.get("weights") if policy == RELATIVE_MOMENTUM_POLICY else None)
+            ensemble_weights=momentum_config.get("weights") if policy == RELATIVE_MOMENTUM_POLICY else None,
+            recovery_sleeve=policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve")
     elif daily:
         result, trades, ledger = run_daily_policy(selected, capital, policy, fee, slippage, range_start,
                                                   distributions, cash_yield, momentum_dividends,
@@ -420,28 +467,56 @@ if run:
     st.altair_chart(line + buys + sells, use_container_width=True)
     if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY):
         st.subheader("ETF held by the strategy")
-        if policy == TOP_THREE_MOMENTUM_POLICY:
+        if policy == TOP_THREE_MOMENTUM_POLICY or (
+                policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve"):
+            recovery_chart = policy == RELATIVE_MOMENTUM_POLICY
             held_rows = []
             for stamp, holding in price[["Time", "rotation_symbol"]].itertuples(index=False, name=None):
                 symbols = [] if holding == "CASH" else str(holding).split(", ")
                 if not symbols:
                     symbols = ["CASH"]
-                held_rows.extend({"Time": stamp, "ETF": etf, "Rank": f"Top {rank}"}
-                                 for rank, etf in enumerate(symbols[:3], start=1))
-            allocation = alt.Chart(pd.DataFrame(held_rows)).mark_line(
+                for rank, etf in enumerate(symbols[:3], start=1):
+                    position = ("12-month core" if rank == 1 else "3-month sleeve") if recovery_chart else f"Top {rank}"
+                    held_rows.append({"Time": stamp, "ETF": etf, "Rank": position,
+                                      "Description": ETF_DESCRIPTIONS.get(etf, "ETF")})
+            held_data = pd.DataFrame(held_rows)
+            etf_names = sorted(held_data["ETF"].unique())
+            allocation = alt.Chart(held_data).mark_line(
                 interpolate="step-after", strokeWidth=2
             ).encode(
                 x=alt.X("Time:T", title="Time"),
-                y=alt.Y("ETF:N", title="Selected ETF", sort="ascending"),
-                color=alt.Color("Rank:N", title="Momentum rank",
-                                scale=alt.Scale(domain=["Top 1", "Top 2", "Top 3"],
+                y=alt.Y("ETF:N", title=None, sort=etf_names,
+                        axis=alt.Axis(labels=False, ticks=False, domain=False)),
+                color=alt.Color("Rank:N", title="Position",
+                                scale=alt.Scale(domain=( ["12-month core", "3-month sleeve"] if recovery_chart else
+                                                         ["Top 1", "Top 2", "Top 3"]),
                                                 range=["#2563eb", "#16a34a", "#f59e0b"])),
                 detail="Rank:N", order="Time:T")
         else:
-            allocation = alt.Chart(price).mark_line(interpolate="step-after", strokeWidth=2).encode(
+            held_data = price[["Time", "rotation_symbol"]].rename(
+                columns={"rotation_symbol": "ETF"})
+            etf_names = sorted(held_data["ETF"].dropna().unique())
+            allocation = alt.Chart(held_data).mark_line(interpolate="step-after", strokeWidth=2).encode(
                 x=alt.X("Time:T", title="Time"),
-                y=alt.Y("rotation_symbol:N", title="Selected ETF", sort="ascending"))
-        st.altair_chart(allocation, use_container_width=True)
+                y=alt.Y("ETF:N", title=None, sort=etf_names,
+                        axis=alt.Axis(labels=False, ticks=False, domain=False)))
+        label_data = pd.DataFrame({"ETF": etf_names})
+        label_data["Description"] = label_data["ETF"].map(
+            lambda etf: ETF_DESCRIPTIONS.get(etf, "ETF"))
+        etf_labels = alt.Chart(label_data).mark_text(
+            align="right", baseline="middle", color="#e5e7eb", fontSize=11
+        ).encode(
+            y=alt.Y("ETF:N", sort=etf_names,
+                    axis=alt.Axis(labels=False, ticks=False, domain=False,
+                                  title="Selected ETF", titleColor="#e5e7eb")),
+            text="ETF:N",
+            tooltip=[alt.Tooltip("ETF:N", title="ETF"),
+                     alt.Tooltip("Description:N", title="설명")])
+        st.altair_chart(
+            alt.hconcat(etf_labels.properties(width=75, height=280),
+                        allocation.properties(width=850, height=280), spacing=4)
+            .resolve_scale(y="shared"),
+            use_container_width=True)
     if policy == "RSI recovery (14, 30/70)":
         rsi_frame = result.reset_index().rename(columns={result.index.name or "index": "Time"})
         signal_points = rsi_frame[rsi_frame.rsi_buy | rsi_frame.rsi_sell].copy()
