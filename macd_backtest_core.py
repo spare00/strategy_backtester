@@ -82,16 +82,20 @@ def fetch_ibkr_daily_bars_many(symbols: list[str], start: datetime, end: datetim
                               clientId=int(os.getenv("IBKR_BACKTEST_CLIENT_ID", "79")),
                               readonly=True, timeout=15)
         try:
-            contracts = [Stock(symbol, "SMART", "USD") for symbol in dict.fromkeys(symbols)]
-            qualified = await ib.qualifyContractsAsync(*contracts)
             result = {}
-            for symbol, contract in zip(dict.fromkeys(symbols), qualified):
+            for symbol in dict.fromkeys(symbols):
+                qualified = await ib.qualifyContractsAsync(Stock(symbol, "SMART", "USD"))
+                if not qualified or qualified[0] is None:
+                    continue
+                contract = qualified[0]
                 for attempt in range(3):
                     try:
                         bars = await ib.reqHistoricalDataAsync(
                             contract, endDateTime=end_time, durationStr=duration, barSizeSetting="1 day",
                             whatToShow="TRADES", useRTH=True, formatDate=1)
-                        break
+                        if bars or attempt == 2:
+                            break
+                        await asyncio.sleep(2 ** attempt)
                     except Exception:
                         if attempt == 2:
                             raise
@@ -464,11 +468,20 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  always_invested: bool = False,
                                  risk_adjusted_alpha: float | None = None,
                                  ensemble_weights: tuple[float, float, float] | None = None,
-                                 recovery_sleeve: bool = False
+                                 recovery_sleeve: bool = False,
+                                 momentum_lookback_months: int = 12,
+                                 trend_lookback_months: int = 10,
+                                 hysteresis_gap_pct: float = 0.0
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
         raise ValueError("top_n must be at least 1")
+    if momentum_lookback_months < 1:
+        raise ValueError("Momentum lookback must be at least 1 month")
+    if trend_lookback_months < 1:
+        raise ValueError("Trend lookback must be at least 1 month")
+    if hysteresis_gap_pct < 0:
+        raise ValueError("Hysteresis gap must be nonnegative")
     if ensemble_weights is not None and (len(ensemble_weights) != 3 or
                                          not math.isclose(sum(ensemble_weights), 1.0, abs_tol=1e-9)):
         raise ValueError("Ensemble weights must contain three values that sum to 1")
@@ -501,15 +514,18 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
     decisions, decision_dates = pd.Series(index=closes.index, dtype=object), pd.Series(index=closes.index, dtype=object)
     decision_weights = pd.Series(index=closes.index, dtype=float)
     decision_allocations = pd.Series(index=closes.index, dtype=object)
-    monthly_average = month_closes.rolling(10, min_periods=10).mean()
+    monthly_average = month_closes.rolling(trend_lookback_months,
+                                           min_periods=trend_lookback_months).mean()
     last_selected = None
+    hysteresis_selected = None
     recovery_active = False
     for i, stamp in enumerate(month_ends):
         winners = ()
         winner_allocations = {}
         momentum_end = month_ends[i - 1] if skip_recent_month and i > 0 else stamp
-        if stamp in monthly_average.index and i >= 9 and (not skip_recent_month or i > 0):
-            prior = int(closes.index.searchsorted(momentum_end - pd.DateOffset(months=12), side="right")) - 1
+        if stamp in monthly_average.index and (always_invested or i >= trend_lookback_months - 1) and (not skip_recent_month or i > 0):
+            prior = int(closes.index.searchsorted(
+                momentum_end - pd.DateOffset(months=momentum_lookback_months), side="right")) - 1
             if prior >= 0:
                 equity_candidates, defensive_candidates, risk_candidates, ensemble_candidates = {}, {}, {}, {}
                 candidates = {}
@@ -627,7 +643,14 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                         decision_weights.loc[stamp] = 1.0
                     last_selected = winners[0] if winners else None
                 elif candidates:
-                    winners = tuple(sorted(candidates, key=candidates.get, reverse=True)[:top_n])
+                    ranked = sorted(candidates, key=candidates.get, reverse=True)
+                    if (hysteresis_gap_pct > 0 and always_invested and hysteresis_selected in candidates and
+                            ranked[0] != hysteresis_selected and
+                            (candidates[ranked[0]] - candidates[hysteresis_selected]) * 100 < hysteresis_gap_pct):
+                        ranked[0] = hysteresis_selected
+                    winners = tuple(ranked[:top_n])
+                    if winners:
+                        hysteresis_selected = winners[0]
                     decision_weights.loc[stamp] = 1.0
                 else:
                     decision_weights.loc[stamp] = 1.0

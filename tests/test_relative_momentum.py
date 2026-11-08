@@ -23,9 +23,11 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         presets = app.selectbox(key="relative_momentum_preset").options
         self.assertIn("12-month baseline (cash if none qualify)", presets)
         self.assertIn("Always invested (12-month)", presets)
+        self.assertIn("Always invested (6-month)", presets)
+        self.assertIn("6-month momentum + 6-month SMA filter", presets)
         self.assertIn("Risk-adjusted α=0.5", presets)
         self.assertIn("Ensemble Balanced (25/35/40)", presets)
-        self.assertEqual(len(presets), 12)
+        self.assertEqual(len(presets), 15)
         for preset in presets:
             app.selectbox(key="relative_momentum_preset").set_value(preset).run()
             self.assertFalse(app.exception, preset)
@@ -54,6 +56,30 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         self.assertEqual(first_buy["Asset"], "AAA")
         self.assertEqual(first_buy["Fill time"], pd.Timestamp("2024-02-01", tz=NY))
         self.assertEqual(result.loc[first_buy["Fill time"], "rotation_symbol"], "AAA")
+
+    def test_arm_zero_matches_always_invested_and_hysteresis_reduces_switches(self):
+        dates = pd.bdate_range("2019-01-02", "2023-12-29", tz=NY)
+        t = np.arange(len(dates))
+
+        def frame(drift, amplitude):
+            close = 100 * np.cumprod(1 + drift + amplitude * np.sin(t / 18))
+            return pd.DataFrame({"open": close, "high": close, "low": close, "close": close}, index=dates)
+
+        frames = {"QQQ": frame(0.0002, 0.001), "AAA": frame(0.0010, 0.0004),
+                  "BBB": frame(0.0009, 0.0004)}
+        start = pd.Timestamp("2021-01-04", tz=NY)
+        baseline = run_relative_momentum_policy(frames, "QQQ", 100_000, 0, 0, start, {},
+                                                 always_invested=True)
+        zero_gap = run_relative_momentum_policy(frames, "QQQ", 100_000, 0, 0, start, {},
+                                                always_invested=True, hysteresis_gap_pct=0)
+        pd.testing.assert_series_equal(baseline[0].rotation_symbol, zero_gap[0].rotation_symbol)
+        pd.testing.assert_series_equal(baseline[0].equity, zero_gap[0].equity)
+        self.assertEqual(baseline[1], zero_gap[1])
+
+        sticky = run_relative_momentum_policy(frames, "QQQ", 100_000, 0, 0, start, {},
+                                               always_invested=True, hysteresis_gap_pct=5)
+        self.assertLessEqual(len(sticky[1]), len(baseline[1]))
+        self.assertTrue(sticky[0].invested.iloc[:-1].all())
 
     def test_risk_adjusted_momentum_prefers_lower_volatility_sector(self):
         dates = pd.bdate_range("2019-01-02", "2023-12-29", tz=NY)
