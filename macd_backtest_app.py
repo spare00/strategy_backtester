@@ -487,11 +487,16 @@ if run:
     st.altair_chart(line + buys + sells, use_container_width=True)
     if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, TOP_THREE_MOMENTUM_POLICY):
         st.subheader("ETF held by the strategy")
+        holdings = price[["Time", "rotation_symbol"]].copy()
+        final_liquidation = trades_df[trades_df.Side == "Final liquidation"]
+        if not final_liquidation.empty and final_liquidation["Fill time"].max() == holdings["Time"].iloc[-1]:
+            holdings.loc[holdings.index[-1], "rotation_symbol"] = ", ".join(
+                final_liquidation.Asset.astype(str).unique())
         if policy == TOP_THREE_MOMENTUM_POLICY or (
                 policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve"):
             recovery_chart = policy == RELATIVE_MOMENTUM_POLICY
             held_rows = []
-            for stamp, holding in price[["Time", "rotation_symbol"]].itertuples(index=False, name=None):
+            for stamp, holding in holdings.itertuples(index=False, name=None):
                 symbols = [] if holding == "CASH" else str(holding).split(", ")
                 if not symbols:
                     symbols = ["CASH"]
@@ -513,7 +518,7 @@ if run:
                                                 range=["#2563eb", "#16a34a", "#f59e0b"])),
                 detail="Rank:N", order="Time:T")
         else:
-            held_data = price[["Time", "rotation_symbol"]].rename(
+            held_data = holdings.rename(
                 columns={"rotation_symbol": "ETF"})
             etf_names = sorted(held_data["ETF"].dropna().unique())
             allocation = alt.Chart(held_data).mark_line(interpolate="step-after", strokeWidth=2).encode(
