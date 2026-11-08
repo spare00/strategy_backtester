@@ -262,7 +262,7 @@ if policy == RELATIVE_MOMENTUM_POLICY:
     selected_strategy += f" ({relative_preset})"
 elif policy == TOP_THREE_MOMENTUM_POLICY:
     selected_strategy += f" ({top_three_preset})"
-st.subheader(f"Selected strategy: {selected_strategy}")
+st.subheader(f"Strategy: {selected_strategy}")
 
 if run:
     if start_date > end_date:
@@ -413,6 +413,8 @@ if run:
         st.caption("Hold QQQ while the completed month-end close is above its 10-month simple moving average. Move to cash only after a completed month closes below it, and re-enter after a later month closes above it. The signal executes at the next trading session open; no intramonth exits.")
     if policy == RELATIVE_MOMENTUM_POLICY:
         st.caption(f"{descriptions[mode]} Trades fill at the next session open; the selected symbol is the benchmark.")
+    if policy == ARM_POLICY:
+        st.caption(f"Always hold the top ETF by trailing 12-month total return. Switch from the current ETF only when the leader's momentum advantage reaches {hysteresis_gap}%p. Trades fill at the next session open; exposure remains fully invested.")
     if policy == TOP_THREE_MOMENTUM_POLICY:
         description = ("At each completed month-end, rank the same ETF universe by trailing 12-month total return. Hold the top three qualifying ETFs in equal weights; each needs a positive return and a close above its 10-month average. Hold cash if none qualify."
                        if not TOP_THREE_PRESETS[top_three_preset] else
@@ -470,7 +472,7 @@ if run:
     if trades_df.empty:
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
-    elif policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY):
+    elif policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, TOP_THREE_MOMENTUM_POLICY):
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
     else:
@@ -480,10 +482,10 @@ if run:
                                  else ("triangle-up", "triangle-down"))
         buys = alt.Chart(trades_df[trades_df.Side == "Buy"]).mark_point(shape=buy_shape, filled=True, size=75, color="#16a34a").encode(x="Fill time:T", y="Price:Q")
         sells = alt.Chart(trades_df[trades_df.Side != "Buy"]).mark_point(shape=sell_shape, filled=True, size=75, color="#dc2626").encode(x="Fill time:T", y="Price:Q")
-    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY,
+    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY,
                                                               TOP_THREE_MOMENTUM_POLICY) else "Price and fills")
     st.altair_chart(line + buys + sells, use_container_width=True)
-    if policy in (RELATIVE_MOMENTUM_POLICY, TOP_THREE_MOMENTUM_POLICY):
+    if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, TOP_THREE_MOMENTUM_POLICY):
         st.subheader("ETF held by the strategy")
         if policy == TOP_THREE_MOMENTUM_POLICY or (
                 policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve"):
