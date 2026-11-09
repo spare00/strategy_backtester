@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 from macd_backtest_core import NY, run_relative_momentum_policy
@@ -80,6 +81,25 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
                                                always_invested=True, hysteresis_gap_pct=5)
         self.assertLessEqual(len(sticky[1]), len(baseline[1]))
         self.assertTrue(sticky[0].invested.iloc[:-1].all())
+
+    def test_arm_2x_policy_runs_with_leveraged_etf_history(self):
+        dates = pd.bdate_range("2021-01-04", "2026-10-30", tz=NY)
+        frames = {}
+        for rank, symbol in enumerate(("SSO", "QLD", "UWM", "DDM", "ROM", "UYG", "UCC",
+                                       "UXI", "UGE", "UPW", "RXL", "DIG", "UYM", "USD", "QQQ")):
+            close = 100 * (1 + (rank + 1) * 0.00001) ** np.arange(len(dates))
+            frames[symbol] = pd.DataFrame({"open": close, "high": close, "low": close,
+                                           "close": close}, index=dates)
+        app_path = Path(__file__).resolve().parents[1] / "macd_backtest_app.py"
+        with patch("macd_backtest_core.fetch_ibkr_daily_bars_many", return_value=frames):
+            app = AppTest.from_file(str(app_path)).run()
+            self.assertIn("ARM – Hysteresis (2x ETFs)", app.selectbox(key="policy").options)
+            app.selectbox(key="policy").set_value("ARM – Hysteresis (2x ETFs)").run()
+            app.date_input(key="date_start").set_value(pd.Timestamp("2024-01-02").date())
+            app.date_input(key="date_end").set_value(pd.Timestamp("2026-10-30").date())
+            app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("Final strategy value" in metric.label for metric in app.metric))
 
     def test_risk_adjusted_momentum_prefers_lower_volatility_sector(self):
         dates = pd.bdate_range("2019-01-02", "2023-12-29", tz=NY)
