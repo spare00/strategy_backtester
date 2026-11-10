@@ -471,7 +471,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                                  recovery_sleeve: bool = False,
                                  momentum_lookback_months: int = 12,
                                  trend_lookback_months: int = 10,
-                                 hysteresis_gap_pct: float = 0.0
+                                 hysteresis_gap_pct: float = 0.0,
+                                 defensive_fallback_symbol: str | None = None
                                  ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Rotate monthly into the top momentum ETF(s); optionally gate equities on a market trend."""
     if top_n < 1:
@@ -644,7 +645,8 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                     last_selected = winners[0] if winners else None
                 elif candidates:
                     ranked = sorted(candidates, key=candidates.get, reverse=True)
-                    if (hysteresis_gap_pct > 0 and always_invested and hysteresis_selected in candidates and
+                    if (hysteresis_gap_pct > 0 and (always_invested or defensive_fallback_symbol is not None) and
+                            hysteresis_selected in candidates and
                             ranked[0] != hysteresis_selected and
                             (candidates[ranked[0]] - candidates[hysteresis_selected]) * 100 < hysteresis_gap_pct):
                         ranked[0] = hysteresis_selected
@@ -656,6 +658,11 @@ def run_relative_momentum_policy(frames: dict[str, pd.DataFrame], benchmark_symb
                     decision_weights.loc[stamp] = 1.0
                 if winners and not winner_allocations:
                     winner_allocations = {symbol: 1.0 / len(winners) for symbol in winners}
+        if not winners and defensive_fallback_symbol in closes.columns:
+            winners = (defensive_fallback_symbol,)
+            winner_allocations = {defensive_fallback_symbol: 1.0}
+            hysteresis_selected = defensive_fallback_symbol
+            decision_weights.loc[stamp] = 1.0
         decisions.loc[stamp], decision_dates.loc[stamp] = winners, stamp
         if winner_allocations:
             decision_allocations.loc[stamp] = winner_allocations

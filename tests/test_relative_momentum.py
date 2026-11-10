@@ -15,6 +15,7 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         app = AppTest.from_file(str(app_path)).run()
         self.assertFalse(app.exception)
         self.assertIn("Monthly ETF relative momentum", app.selectbox(key="policy").options)
+        self.assertIn("ARM-H5 + SHY defensive mode", app.selectbox(key="policy").options)
         self.assertIn("Monthly top-3 ETF momentum", app.selectbox(key="policy").options)
         self.assertNotIn("ETF relative momentum rotation", app.selectbox(key="policy").options)
         self.assertNotIn("Monthly sector ensemble momentum", app.selectbox(key="policy").options)
@@ -82,6 +83,47 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
         self.assertLessEqual(len(sticky[1]), len(baseline[1]))
         self.assertTrue(sticky[0].invested.iloc[:-1].all())
 
+        eligible_only = run_relative_momentum_policy(
+            frames, "QQQ", 100_000, 0, 0, start, {}, candidate_symbols=("AAA", "BBB"),
+            defensive_fallback_symbol="QQQ")
+        eligible_hysteresis = run_relative_momentum_policy(
+            frames, "QQQ", 100_000, 0, 0, start, {}, candidate_symbols=("AAA", "BBB"),
+            hysteresis_gap_pct=5, defensive_fallback_symbol="QQQ")
+        self.assertLessEqual(len(eligible_hysteresis[1]), len(eligible_only[1]))
+        self.assertTrue(eligible_hysteresis[0].invested.iloc[:-1].all())
+
+    def test_arm_h5_shy_fallback_and_reentry_fill_next_session(self):
+        dates = pd.bdate_range("2018-01-02", "2025-12-31", tz=NY)
+
+        def frame(anchors):
+            positions = [dates.get_indexer([pd.Timestamp(day, tz=NY)], method="nearest")[0]
+                         for day, _ in anchors]
+            close = np.exp(np.interp(np.arange(len(dates)), positions,
+                                     np.log([value for _, value in anchors])))
+            return pd.DataFrame({"open": close, "high": close, "low": close, "close": close}, index=dates)
+
+        frames = {
+            "AAA": frame([("2018-01-02", 50), ("2020-01-02", 100), ("2021-01-04", 150),
+                           ("2022-01-03", 60), ("2023-01-03", 60), ("2024-01-02", 200),
+                           ("2025-12-31", 220)]),
+            "SHY": frame([("2018-01-02", 100), ("2025-12-31", 105)]),
+            "QQQ": frame([("2018-01-02", 100), ("2025-12-31", 120)]),
+        }
+        result, trades, _ = run_relative_momentum_policy(
+            frames, "QQQ", 100_000, 0, 0, pd.Timestamp("2020-01-02", tz=NY), {},
+            candidate_symbols=("AAA",), hysteresis_gap_pct=5,
+            defensive_fallback_symbol="SHY")
+
+        shy_fill = pd.Timestamp("2021-03-01", tz=NY)
+        reentry_fill = pd.Timestamp("2023-02-01", tz=NY)
+        self.assertEqual(result.loc[shy_fill, "rotation_symbol"], "SHY")
+        self.assertEqual(result.loc[reentry_fill, "rotation_symbol"], "AAA")
+        self.assertTrue(result.invested.loc[shy_fill:reentry_fill].all())
+        self.assertTrue(any(t["Asset"] == "SHY" and t["Side"] == "Buy" and
+                            t["Fill time"] == shy_fill for t in trades))
+        self.assertTrue(any(t["Asset"] == "AAA" and t["Side"] == "Buy" and
+                            t["Fill time"] == reentry_fill for t in trades))
+
     def test_arm_2x_policy_runs_with_leveraged_etf_history(self):
         dates = pd.bdate_range("2021-01-04", "2026-10-30", tz=NY)
         frames = {}
@@ -97,6 +139,25 @@ class RelativeMomentumPolicyTests(unittest.TestCase):
             app.selectbox(key="policy").set_value("ARM – Hysteresis (2x ETFs)").run()
             app.date_input(key="date_start").set_value(pd.Timestamp("2024-01-02").date())
             app.date_input(key="date_end").set_value(pd.Timestamp("2026-10-30").date())
+            app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("Final strategy value" in metric.label for metric in app.metric))
+
+    def test_arm_h5_shy_policy_loads_shy_and_runs(self):
+        dates = pd.bdate_range("2018-01-02", "2025-12-31", tz=NY)
+        close = 100 * (1.0003 ** np.arange(len(dates)))
+        frame = pd.DataFrame({"open": close, "high": close, "low": close, "close": close}, index=dates)
+        app_path = Path(__file__).resolve().parents[1] / "macd_backtest_app.py"
+
+        def fetch(symbols, _start, _end):
+            self.assertIn("SHY", symbols)
+            return {symbol: frame.copy() for symbol in symbols}
+
+        with patch("macd_backtest_core.fetch_ibkr_daily_bars_many", side_effect=fetch):
+            app = AppTest.from_file(str(app_path)).run()
+            app.selectbox(key="policy").set_value("ARM-H5 + SHY defensive mode")
+            app.date_input(key="date_start").set_value(pd.Timestamp("2021-01-04").date())
+            app.date_input(key="date_end").set_value(pd.Timestamp("2024-12-31").date())
             app.button[0].click().run()
         self.assertFalse(app.exception)
         self.assertTrue(any("Final strategy value" in metric.label for metric in app.metric))

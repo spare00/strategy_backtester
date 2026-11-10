@@ -19,6 +19,7 @@ MONTHLY_TREND_POLICY = "Monthly 10-month SMA risk filter"
 RELATIVE_MOMENTUM_POLICY = "Monthly ETF relative momentum"
 ARM_POLICY = "ARM – Hysteresis"
 ARM_2X_POLICY = "ARM – Hysteresis (2x ETFs)"
+ARM_SHY_POLICY = "ARM-H5 + SHY defensive mode"
 TOP_THREE_MOMENTUM_POLICY = "Monthly top-3 ETF momentum"
 TOP_THREE_PRESETS = {
     "Qualified only (cash if none)": False,
@@ -108,6 +109,7 @@ ETF_DESCRIPTIONS = {
 DEFENSIVE_UNIVERSE = ("SHY", "IEF", "TLT", "GLD")
 DAILY_POLICIES = ("Close above 200-day SMA", "50/200-day SMA cross", "RSI recovery (14, 30/70)",
                   BOLLINGER_POLICY, MONTHLY_TREND_POLICY, RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY,
+                  ARM_SHY_POLICY,
                   TOP_THREE_MOMENTUM_POLICY, MOMENTUM_POLICY, ACCUMULATION_POLICY)
 SUPERTREND_POLICY = "SuperTrend (ATR arrows)"
 ALL_POLICIES = INTRADAY_POLICIES + DAILY_POLICIES + (SUPERTREND_POLICY,)
@@ -120,6 +122,7 @@ POLICY_LABELS = {
     RELATIVE_MOMENTUM_POLICY: "Monthly ETF relative momentum",
     ARM_POLICY: ARM_POLICY,
     ARM_2X_POLICY: ARM_2X_POLICY,
+    ARM_SHY_POLICY: ARM_SHY_POLICY,
     TOP_THREE_MOMENTUM_POLICY: "Monthly top-3 ETF momentum",
     MOMENTUM_POLICY: "Monthly 12-month absolute momentum (cash when return ≤ 0)",
     ACCUMULATION_POLICY: "Accumulation breakout (base + volume confirmation)",
@@ -286,8 +289,9 @@ if run:
         st.stop()
     with st.spinner(f"Loading historical bars from {data_source}…"):
         try:
-            if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, TOP_THREE_MOMENTUM_POLICY):
-                extra_symbols = (DEFENSIVE_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "regime" else
+            if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, ARM_SHY_POLICY, TOP_THREE_MOMENTUM_POLICY):
+                extra_symbols = (("SHY",) if policy == ARM_SHY_POLICY else
+                                 DEFENSIVE_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "regime" else
                                  SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve" else ())
                 universe = (tuple(ARM_2X_ETFS.values()) if policy == ARM_2X_POLICY else
                             ROTATION_UNIVERSE + INDUSTRY_UNIVERSE
@@ -337,7 +341,7 @@ if run:
         result, trades, ledger = run_accumulation_policy(
             selected, capital, fee, slippage, range_start, distributions, cash_yield,
             base_days, max_base_range, breakout_volume, cmf_threshold)
-    elif policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, TOP_THREE_MOMENTUM_POLICY):
+    elif policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, ARM_SHY_POLICY, TOP_THREE_MOMENTUM_POLICY):
         rotation_frames = {ticker: bars[bars.index >= range_start - pd.Timedelta(days=400)]
                            for ticker, bars in rotation_data.items()}
         rotation_dividends = ({ticker: [] for ticker in rotation_frames} if data_source == "IBKR Gateway" else
@@ -352,6 +356,7 @@ if run:
             skip_recent_month=policy == RELATIVE_MOMENTUM_POLICY and mode == "skip_month",
             sector_defense=policy == RELATIVE_MOMENTUM_POLICY and mode == "sector_defense",
             candidate_symbols=(tuple(ARM_2X_ETFS.values()) if policy == ARM_2X_POLICY else
+                               ROTATION_UNIVERSE if policy == ARM_SHY_POLICY else
                                SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode in ("risk_adjusted", "ensemble") else
                                (*ROTATION_UNIVERSE, symbol) if policy == RELATIVE_MOMENTUM_POLICY and mode == "sector_defense" else None),
             sector_symbols=SECTOR_UNIVERSE if policy == RELATIVE_MOMENTUM_POLICY and mode in ("sector_defense", "recovery_sleeve") else None,
@@ -366,7 +371,9 @@ if run:
             risk_adjusted_alpha=momentum_config.get("alpha") if policy == RELATIVE_MOMENTUM_POLICY else None,
             ensemble_weights=momentum_config.get("weights") if policy == RELATIVE_MOMENTUM_POLICY else None,
             recovery_sleeve=policy == RELATIVE_MOMENTUM_POLICY and mode == "recovery_sleeve",
-            hysteresis_gap_pct=float(hysteresis_gap) if policy in (ARM_POLICY, ARM_2X_POLICY) else 0.0)
+            hysteresis_gap_pct=(5.0 if policy == ARM_SHY_POLICY else
+                                float(hysteresis_gap) if policy in (ARM_POLICY, ARM_2X_POLICY) else 0.0),
+            defensive_fallback_symbol="SHY" if policy == ARM_SHY_POLICY else None)
     elif daily:
         result, trades, ledger = run_daily_policy(selected, capital, policy, fee, slippage, range_start,
                                                   distributions, cash_yield, momentum_dividends,
@@ -426,6 +433,8 @@ if run:
         st.caption(f"Always hold the top ETF by trailing 12-month total return. Switch from the current ETF only when the leader's momentum advantage reaches {hysteresis_gap}%p. Trades fill at the next session open; exposure remains fully invested.")
     if policy == ARM_2X_POLICY:
         st.caption(f"Rank actual 2x daily leveraged ETF prices by trailing 12-month total return and apply ARM with a {hysteresis_gap}%p switch threshold. Leverage resets daily; long-period returns are not simply twice the underlying ETF. USD is the semiconductor proxy for SMH, with a different index.")
+    if policy == ARM_SHY_POLICY:
+        st.caption("Rank the regular ETF universe by trailing 12-month total return. Require a positive return and a close above the 10-month average; keep the current ETF while eligible until a leader gains 5%p. If it becomes ineligible, switch to the strongest eligible ETF. Hold SHY when none qualify. Signals use completed month-end data and fill at the next session open; exposure remains fully invested.")
     if policy == TOP_THREE_MOMENTUM_POLICY:
         description = ("At each completed month-end, rank the same ETF universe by trailing 12-month total return. Hold the top three qualifying ETFs in equal weights; each needs a positive return and a close above its 10-month average. Hold cash if none qualify."
                        if not TOP_THREE_PRESETS[top_three_preset] else
@@ -483,7 +492,7 @@ if run:
     if trades_df.empty:
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
-    elif policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, TOP_THREE_MOMENTUM_POLICY):
+    elif policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, ARM_SHY_POLICY, TOP_THREE_MOMENTUM_POLICY):
         buys = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
         sells = alt.Chart(pd.DataFrame(columns=["Fill time", "Price"])).mark_point()
     else:
@@ -493,10 +502,10 @@ if run:
                                  else ("triangle-up", "triangle-down"))
         buys = alt.Chart(trades_df[trades_df.Side == "Buy"]).mark_point(shape=buy_shape, filled=True, size=75, color="#16a34a").encode(x="Fill time:T", y="Price:Q")
         sells = alt.Chart(trades_df[trades_df.Side != "Buy"]).mark_point(shape=sell_shape, filled=True, size=75, color="#dc2626").encode(x="Fill time:T", y="Price:Q")
-    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY,
+    st.subheader(f"{symbol} benchmark price" if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, ARM_SHY_POLICY,
                                                               TOP_THREE_MOMENTUM_POLICY) else "Price and fills")
     st.altair_chart(line + buys + sells, use_container_width=True)
-    if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, TOP_THREE_MOMENTUM_POLICY):
+    if policy in (RELATIVE_MOMENTUM_POLICY, ARM_POLICY, ARM_2X_POLICY, ARM_SHY_POLICY, TOP_THREE_MOMENTUM_POLICY):
         st.subheader("ETF held by the strategy")
         holdings = price[["Time", "rotation_symbol"]].copy()
         final_liquidation = trades_df[trades_df.Side == "Final liquidation"]
